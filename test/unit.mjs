@@ -19,7 +19,7 @@ import {
   sliceByWidth,
 } from "../lib/winget.js";
 import { compareVersions, isNewer, looksLikeVersion, splitVersion, compareTails, normalizeVersionKey } from "../lib/version.js";
-import { parseInstallerManifest, splitSwitchArgs, defaultSilentArgs, resolveInstallArgs, parseBrewCaskVersions, parseBrewOutdated, findBrew, isArchNotFoundError, explainInstallerExitCode, evaluateUpdateResult, findEdgeUpdate, updateHintFor, pickInstallerSha256, verifyInstallerHash, sha256File } from "../lib/engine.js";
+import { parseInstallerManifest, splitSwitchArgs, defaultSilentArgs, resolveInstallArgs, parseBrewCaskVersions, parseBrewOutdated, findBrew, isArchNotFoundError, explainInstallerExitCode, evaluateUpdateResult, findEdgeUpdate, updateHintFor, pickInstallerSha256, verifyInstallerHash, sha256File, classifyWingetError, isSourceLevelFailure, formatFallbackError, idArchSuffix, archMismatchFor } from "../lib/engine.js";
 import { psQuote, ELEVATION_CANCELLED, isElevated } from "../lib/elevate.js";
 import {
   applicationDirs,
@@ -1441,6 +1441,85 @@ group("1.3.16：macOS 扫描三阶段并发（源码断言）");
   ok(/brewPhase = \(async \(\) =>/.test(macScan) && /catalogPhase = \(async \(\) =>/.test(macScan), "三阶段各自隔离（降级语义不互相污染）");
   ok(/Homebrew 列表命令失败/.test(macScan) && /Homebrew 更新检查失败/.test(macScan), "brew 失败降级警告逐字保留");
   ok(/阶段耗时/.test(macScan), "扫描分阶段计时日志存在");
+}
+
+/* ---------------- 1.3.17：Windows 更新失败修复回归锁 ---------------- */
+group("1.3.17：兜底错误去重与来源标注");
+{
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../lib/engine.js"), "utf8");
+  ok(/formatFallbackError\(entry\.error, fb\.error\)/.test(src), "兜底失败走 formatFallbackError 而非直接拼接");
+  ok(/两条通道均报同一错误/.test(src), "同文案时只保留一份并标注两条通道");
+  const A = "官网安装包的哈希与软件目录记录不一致";
+  ok(formatFallbackError(A, A) === A + "（winget download 与 winget upgrade 两条通道均报同一错误）", "A/A 去重且标注");
+  ok(!formatFallbackError(A, A).includes("兜底失败：" + A), "A/A 不再出现「兜底失败：<同句>」");
+  const B = "安装程序退出码 1";
+  const C = "已成功安装";
+  const diff = formatFallbackError(B, C);
+  ok(diff.includes(B) && diff.includes(C) && diff.includes("[winget upgrade]"), "不同错误两段差异都保留（现场 L2912/L2482）");
+  ok(formatFallbackError("", C) === "[winget upgrade] " + C, "主错误为空时只显示兜底段");
+  ok(formatFallbackError(B, "") === B, "兜底错误为空时不追加");
+}
+
+group("1.3.17：无解级失败跳过无效兜底");
+{
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../lib/engine.js"), "utf8");
+  ok(/isSourceLevelFailure\(entry\.error\)/.test(src), "runUpdates 用 isSourceLevelFailure 判定是否兜底");
+  ok(/跳过无效兜底/.test(src), "跳过时写 warn 说明原因");
+  ok(isSourceLevelFailure("0x80190193 : Forbidden (403)."), "403 属源级失败");
+  ok(isSourceLevelFailure("官网下载源拒绝访问（403 Forbidden）"), "403 语义化文案属源级失败");
+  ok(isSourceLevelFailure("软件目录里找不到该包"), "找不到该包属源级失败");
+  ok(isSourceLevelFailure("目录里没有适用的更新"), "无适用更新属源级失败");
+  ok(isSourceLevelFailure("官网安装包的哈希与软件目录记录不一致"), "哈希不符属源级失败（提权兜底必然复现）");
+  ok(!isSourceLevelFailure("安装程序退出码 1"), "本地安装失败不是源级失败（仍允许兜底）");
+  ok(!isSourceLevelFailure("已取消"), "取消不是源级失败");
+}
+
+group("1.3.17：403 语义化 + 架构错误不再误判成「找不到该包」");
+{
+  ok(/官网下载源拒绝访问/.test(classifyWingetError("0x80190193 : Forbidden (403).")), "0x80190193 明确为官网下载源 403");
+  ok(/官网下载源拒绝访问/.test(classifyWingetError("Download request status is not success / Forbidden (403).")), "Forbidden (403) 同样归类");
+  const archErr = classifyWingetError("找不到适用的安装程序;有关详细信息，请参阅日志。");
+  ok(/没有适用的安装包或更新/.test(archErr), "「找不到适用的安装程序」不再误判为「找不到该包」");
+  ok(!/找不到该包/.test(archErr), "架构错误文案里不出现「找不到该包」");
+  ok(/软件目录里找不到该包/.test(classifyWingetError("No package found matching input criteria")), "真正的 No package found 仍归为找不到该包");
+  ok(/没有适用的安装包或更新/.test(classifyWingetError("No applicable update found")), "No applicable update 归为无适用更新");
+}
+
+group("1.3.17：winget 兜底命令与提权退出码");
+{
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../lib/engine.js"), "utf8");
+  const elev = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../lib/elevate.js"), "utf8");
+  ok(/--skip-dependencies/.test(src), "兜底带 --skip-dependencies（winget 1.29 实测存在）");
+  ok(/--include-unknown/.test(src), "兜底命令仍带 --include-unknown");
+  ok(/0x8A15002B/.test(src), "兜底按文本兜住 0x8A15002B（防提权退出码丢失）");
+  ok(/\$pi\.Refresh\(\)/.test(elev), "提权副本取 ExitCode 前先 Refresh");
+  ok(/uint32/.test(elev) && /parseInt\(raw, 16\)/.test(elev), "提权退出码按无符号十六进制往返");
+}
+
+group("1.3.17：哈希不符主流程自救与陈旧清单哈希");
+{
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../lib/engine.js"), "utf8");
+  ok(/--ignore-security-hash/.test(src), "主流程下载支持哈希覆盖重下");
+  ok(/wingetHashOverrideAvailable/.test(src) && /settings", "export"/.test(src), "用 winget settings export 判定 InstallerHashOverride");
+  ok(/hashOverrideUsed/.test(src), "下载结果带 hashOverrideUsed 标记");
+  ok(/stale-manifest/.test(src), "陈旧清单哈希记为 stale-manifest 而非拦截执行");
+  ok(/hashMismatchIsStale/.test(src), "本地复核区分「清单过期」与「文件被替换」");
+}
+
+group("1.3.17：架构不匹配与自更新保护");
+{
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../lib/engine.js"), "utf8");
+  const cli = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../lib/client.js"), "utf8");
+  ok(idArchSuffix("Microsoft.VCRedist.2015+.arm64") === "arm64", "ID 后缀 .arm64 识别为 arm64");
+  ok(idArchSuffix("Microsoft.VCRedist.2015+.x64") === "x64", "ID 后缀 .x64 识别为 x64");
+  ok(idArchSuffix("Microsoft.VCRedist.2015+.x86") === "x86", "ID 后缀 .x86 识别为 x86");
+  ok(idArchSuffix("Google.Chrome") === "", "通用包无架构后缀");
+  ok(archMismatchFor("Microsoft.VCRedist.2015+.arm64", { arch: "x64" }) === true, "x64 机上的 arm64 变体判为不匹配");
+  ok(archMismatchFor("Microsoft.VCRedist.2015+.x64", { arch: "x64" }) === false, "x64 变体匹配");
+  ok(archMismatchFor("Google.Chrome", { arch: "x64" }) === false, "通用包不误判");
+  ok(/arch-mismatch/.test(src) && /arch-mismatch/.test(cli), "扫描与前端都标出架构不匹配");
+  ok(/SELF_UPDATE_IDS/.test(src) && /host-restart/.test(src), "DSH 自更新走 host-restart 分支");
+  ok(/安装程序返回 1/.test(explainInstallerExitCode(1, "")), "退出码 1 给出可操作解释");
 }
 
 /* ---------------- 结果 ---------------- */

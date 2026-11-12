@@ -2,6 +2,49 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.3.17] — 2026-11-12
+
+### 修复：Windows 更新「4 项全失败」与重复兜底报错
+
+现场：Windows 11 build 26300 / x64 / winget 1.29.380，118 个应用、4 个可更新，
+「全部更新」结果 0/4，每条错误都是「A；兜底失败：A」。经 1.3.15 → 1.3.16
+逐文件比对：两个版本的 `lib/engine.js` 前 1501 行（全部 Windows 扫描 / 下载 /
+安装 / 兜底路径）**逐字节相同**，1.3.16 只改了 macOS 段（1509 行起）。所以这些
+失败是 Windows 侧早已存在的 winget 生态适配问题，不是 1.3.16 引入的回归；
+1.3.16 更新日志的「Windows 路径零改动」属实。
+
+- **兜底去重与来源标注**：`winget download` 与 `winget upgrade` 共用同一份清单、
+  同一个官网 URL，失败时经同一个 `classifyWingetError` 得到字节级相同的文案，
+  旧代码把主错误与兜底错误直接拼接，把它打印两遍。新增 `formatFallbackError()`：
+  相同只保留一份并标注「两条通道均报同一错误」，不同则给兜底段加
+  `[winget upgrade]` 来源前缀。
+- **无解级失败不再白跑兜底**：新增 `isSourceLevelFailure()`。403 / 哈希不符 /
+  「软件目录里找不到该包」这类源-清单级失败，第二次 `winget upgrade` 必然复现
+  （Chrome 曾因此单条耗时 122s）。命中即跳过兜底并写一条 warn 说明原因。
+- **403 语义化**：`classifyWingetError` 增加 `0x80190193 / Forbidden (403)` 分支，
+  明确「官网下载源拒绝访问」，不再把最后一行英文原文原样透出。实测
+  `NetEase.UURemote` 的安装包 URL 换任意 UA 都返回 403，属于发布方 CDN 侧问题。
+- **哈希不符的主流程自救**：发布方用固定 URL 原地换包会让清单 SHA-256 过期
+  （winget-cli #3640）。主流程失败后若满足 winget 的前置条件
+  （`InstallerHashOverride` 已开启且非管理员会话，由 `winget settings export` 判定），
+  改用 `--ignore-security-hash` 重下官网当前包；落盘后的本地复核把陈旧的清单哈希
+  记为 `hash: stale-manifest` 而非拦截执行。条件不满足时给出可操作提示。
+  兜底命令加 `--skip-dependencies`（winget 1.29 实测存在），避免依赖包 403
+  拖垮整次升级；哈希覆盖开关**不**加在兜底里，因为 winget 官方明确它不能在
+  管理员会话下使用，而兜底走提权上下文。
+- **架构不匹配的包不再列为可一键更新**：新增 `idArchSuffix()` /
+  `archMismatchFor()`。winget 的 `upgrade` 列表会把所有架构变体都列出来，x64
+  机器上的 `Microsoft.VCRedist.2015+.arm64` 因此被判为「可更新」，但
+  `--architecture x64` 必然拿不到适用安装包（微软文档也明确 ARM64 VC++ 不能装在
+  x64 上）。扫描阶段标为 `reason: arch-mismatch`、`updateSupported: false`，前端
+  显示「架构不匹配本机」，不再进入「全部更新」队列制造必然失败。
+
+### 兼容性
+
+- 更新结果 `entry` 字段只新增可选 `hash: "stale-manifest"` 取值；`ok/error/note`
+  语义不变，`state.json` 结构不变，无新增设置项、无 API 变更。
+- macOS 路径零改动（沿用 1.3.16 的并发预下载 / 三阶段并发扫描）。
+
 ## [1.3.16] — 2026-11-12
 
 ### 性能：macOS 更新引入「并发预下载 + 串行安装」，扫描三阶段并发
