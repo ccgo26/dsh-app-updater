@@ -114,8 +114,11 @@ body `{ "confirm": true, "force": true }` → `{ "ok": true, "started": true }`�
 body `{ "confirm": true, "csrfToken": "<来自 state.json>", "ids": ["Google.Chrome", "..."] }`
 （`mode` 为历史残留字段，宿主不读取；所有写接口一律额外要求 `csrfToken`，见「写操作闸门」。）
 → `{ "ok": true, "started": true, "queued": 3 }`
-（串行执行，逐条：下载官网全量包 → 校验哈希 → 静默安装（需要管理员时自动提权）→ 复核版本。
-Edge 由 `MicrosoftEdgeUpdate.exe /ua` 处理。`settings.dryRun` 时只下载、不安装、不复核。）
+（macOS 与 Windows 同构的两段式：先并发预下载（macOS 用 `brew fetch --cask` 落
+Homebrew 下载缓存、并发度 3；Windows 用 `winget download` 私有目录），再串行
+逐条：校验哈希（Windows）→ 静默安装（需要管理员时自动提权）→ 复核版本。
+安装仍严格串行（安装锁互斥）。Edge 由 `MicrosoftEdgeUpdate.exe /ua` 处理。
+`settings.dryRun` 时只下载、不安装、不复核。）
 
 `update.results[]`（每条一次更新）：
 

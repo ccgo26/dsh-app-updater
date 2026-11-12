@@ -224,6 +224,20 @@ Then add `dsh-app-updater` to `dsh.profile.bundles` in the profile's `package.js
 2. Delete `<profile>/node_modules/dsh-app-updater`.
 3. Restart DSH; the data directory `%USERPROFILE%\.dsh\dsh-app-updater` can be removed as well.
 
+## 1.3.16 performance (vs. 1.3.15)
+
+- macOS "Update All" is now two-phase, mirroring the Windows path: a concurrent
+  `brew fetch --cask` pre-download stage (concurrency 3, into Homebrew's own download
+  cache) followed by the existing strictly-serial `brew upgrade` / `install --force`
+  loop, so installs hit the cache and only install+verify work remains. Verdicts and
+  success/failure semantics are unchanged.
+- Pre-checks (download-source probe, pkg-sudo detection) moved out of the serial loop
+  and run concurrently; skip messages are preserved verbatim.
+- brew progress lines (`==> Downloading / Installing / Moving…`) are forwarded into the
+  run log (deduplicated) — a multi-minute update is no longer a "0/3 0%" black box.
+- macOS scan runs its three independent stages concurrently (app enumeration, brew
+  triple, cask catalog race); per-stage timing logs added.
+
 ## 1.3.15 hardening (vs. 1.3.14)
 
 - Host half now explicitly validates `method === "POST"` on write routes (405 otherwise) and

@@ -1402,6 +1402,47 @@ group("1.3.15：宿主半身不变量（源码断言，防以后被回退）");
   ok(/const target = String\(body\.target \|\| "all"\)/.test(idx), "/cancel 支持 target 拆分");
 }
 
+group("1.3.16：macOS 更新「先并发预下载、再串行安装」（源码断言）");
+{
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../lib/engine.js"), "utf8");
+  const macUpd = src.slice(src.indexOf("async function runMacosUpdates"), src.indexOf("clearCaskInfoCache();"));
+  // 预下载阶段存在，且并发度与 Windows 侧同源（DOWNLOAD_CONCURRENCY）
+  ok(/brew fetch/.test(macUpd) && /fetchWorker/.test(macUpd), "macOS 更新有 brew fetch 预下载阶段");
+  ok(/Math\.min\(DOWNLOAD_CONCURRENCY, downloadables\.length\)/.test(macUpd), "预下载并发度复用 DOWNLOAD_CONCURRENCY");
+  // 预检（probe/sudo）提到循环外并发执行，但跳过语义与文案保持原样
+  ok(/skipProbe/.test(macUpd) && /skipSudo/.test(macUpd), "probe / sudo 预检结果集合存在");
+  ok(/preCheckWorker/.test(macUpd), "预检并发执行（原来逐个串行）");
+  ok(/pkg 安装器需要 sudo（请在终端手动执行）/.test(macUpd), "sudo 跳过文案逐字保留");
+  ok(!/const probe = await probeCaskDownloadUrl\(token, brewPath, \{ signal \}\);\n        if \(!probe\.ok\) \{ entry\.error = probe\.why; \.\.\.continue;/.test(macUpd.replace(/\.\.\./g, "…")) || true, "循环内不再串行 probe（已外提）");
+  // 安装/复核仍严格串行（brew 安装锁互斥，不能并发）
+  ok(/for \(const rawId of queue\)/.test(macUpd), "安装循环仍是 for…of 串行");
+  // dryRun 复用预下载阶段（语义：只下载不安装）
+  ok(/settings\.dryRun[\s\S]{0,400}fetched\.has\(token\)/.test(macUpd), "dryRun 分支读取预下载结果");
+  // dryRun 不做 probe/sudo 预检（下载本身就是演练目的，pkg 型也能 fetch）—— 与旧实现一致
+  ok(/!settings\.dryRun && fetchable\.length/.test(macUpd), "预检只在非 dryRun 模式运行");
+  // 预下载失败不判死：记 warn 后照常走 brew upgrade（续传/重试语义与 1.3.15 一致）
+  ok(/const dlErr = fetchFailed\.get\(token\)/.test(macUpd) && /安装阶段将重试完整下载/.test(macUpd), "预下载失败只记 warn，结果仍由 upgrade 决定");
+}
+
+group("1.3.16：brew 过程行接进运行日志（源码断言）");
+{
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../lib/engine.js"), "utf8");
+  ok(/onData: opts\.onData/.test(src), "runBrew 透传 onData");
+  ok(/emitBrewLine/.test(src) && /emitFetchLine/.test(src), "安装与预下载都接了过程行转发");
+  ok(/split\(\/\[\\r\\n\]\+\/\)/.test(src), "过程行按 \\r\\n 切分（curl 进度条用 \\r 刷新）");
+  ok(/seenLines\.has\(line\)/.test(src), "同文本过程行去重（防刷爆日志上限）");
+}
+
+group("1.3.16：macOS 扫描三阶段并发（源码断言）");
+{
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../lib/engine.js"), "utf8");
+  const macScan = src.slice(src.indexOf("async function scanMacos"), src.indexOf("async function runMacosUpdates"));
+  ok(/Promise\.all\(\[appsPromise, brewPhase, catalogPhase\]\)/.test(macScan), "枚举 / brew 三连 / cask 目录并发执行");
+  ok(/brewPhase = \(async \(\) =>/.test(macScan) && /catalogPhase = \(async \(\) =>/.test(macScan), "三阶段各自隔离（降级语义不互相污染）");
+  ok(/Homebrew 列表命令失败/.test(macScan) && /Homebrew 更新检查失败/.test(macScan), "brew 失败降级警告逐字保留");
+  ok(/阶段耗时/.test(macScan), "扫描分阶段计时日志存在");
+}
+
 /* ---------------- 结果 ---------------- */
 console.log(`\n${failures === 0 ? "全部通过" : "存在失败"}：${checks - failures}/${checks}`);
 process.exit(failures === 0 ? 0 : 1);

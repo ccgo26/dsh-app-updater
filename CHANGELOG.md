@@ -2,6 +2,42 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.3.16] — 2026-11-12
+
+### 性能：macOS 更新引入「并发预下载 + 串行安装」，扫描三阶段并发
+
+实测基线（本机 Apple Silicon，3 个可更新应用）：刷新检测热态 1.2s；「全部更新」
+320.4s（google-chrome 169s / tencent-meeting 65s / wechat 86s），99% 耗在串行
+`brew upgrade` 的下载阶段；界面全程停在「0/3 0%」没有任何过程可见性。本版针对
+这两点动刀，**不改变任何判定结果与成功/失败语义**：
+
+- **macOS 更新改为与 Windows 侧同构的两段式**：先对全部 token 并发
+  `brew fetch --cask`（并发度 3，复用 `DOWNLOAD_CONCURRENCY`）把安装包拉进
+  Homebrew 自己的下载缓存，再走原有的串行 `brew upgrade` / `install --force`
+  循环——安装命中缓存，只剩安装与复核。总时长从 Σ(下载+安装) 变为
+  ≈ 并发下载最大值 + Σ(安装)。预下载失败的 token 记入失败集合，串行循环按
+  原有「如实报错」语义透出，不吞错误、不静默跳过。
+- **预检（下载源探测 / pkg-sudo 判定）从循环内外提并发执行**：原来逐个串行，
+  github 托管的 cask 每个白等最长 10s。跳过文案与判定语义逐字保留。
+- **`dryRun` 复用预下载阶段**：语义不变（只下载不安装），pkg 型 cask 在演练
+  模式下如实标注「包已就绪、需终端 sudo」。
+- **brew 子过程输出接进运行日志**（`runBrew` 透传 `onData`，安装与预下载都接）：
+  `==> Downloading / Installing / Moving…` 过程行带 token 前缀写入运行日志，
+  按 `\r\n` 切分并去重（curl 的 `##` 进度条用 `\r` 刷新，直接透传会刷爆 400 条
+  日志上限）。「0/3 0% 挂 169 秒」从此有中间可见性。
+- **macOS 扫描三阶段并发**：枚举 `.app`（磁盘）/ brew 三连（子进程）/ cask 目录
+  竞速（网络）互不依赖，`Promise.all` 并发。热态收益小（实测 1.2s），冷态从
+  「相加」变「取最大」。各阶段 catch/降级/warnings 语义逐项保留。
+- **分阶段计时日志**：扫描（并发墙钟 / 官网更新源）、更新（预检 / 预下载）
+  各写一条 `阶段耗时：…s`，供效果对比与排障。
+
+### 兼容性
+
+- 更新结果 `entry` 的 ok/error/note 字段语义与 1.3.15 完全一致；`stats` 口径
+  （total/upgradable/manual/unsupported）不受影响。
+- 无新增设置项、无 API 变更；`state.json` 结构不变。
+- Windows 路径零改动。
+
 ## [1.3.15] — 2026-11-04
 
 ### 安全：写操作默认拒绝再加固（`csrfToken` + `method`）
