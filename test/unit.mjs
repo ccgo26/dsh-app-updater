@@ -19,10 +19,11 @@ import {
   sliceByWidth,
 } from "../lib/winget.js";
 import { compareVersions, isNewer, looksLikeVersion, splitVersion, compareTails, normalizeVersionKey } from "../lib/version.js";
-import { parseInstallerManifest, splitSwitchArgs, defaultSilentArgs, resolveInstallArgs, parseBrewCaskVersions, parseBrewOutdated, findBrew, isArchNotFoundError, explainInstallerExitCode, evaluateUpdateResult, findEdgeUpdate, updateHintFor, pickInstallerSha256, verifyInstallerHash, sha256File, classifyWingetError, isSourceLevelFailure, formatFallbackError, idArchSuffix, archMismatchFor } from "../lib/engine.js";
+import { parseInstallerManifest, splitSwitchArgs, defaultSilentArgs, resolveInstallArgs, parseBrewCaskVersions, parseBrewOutdated, findBrew, isArchNotFoundError, explainInstallerExitCode, evaluateUpdateResult, findEdgeUpdate, updateHintFor, pickInstallerSha256, verifyInstallerHash, sha256File, classifyWingetError, isSourceLevelFailure, formatFallbackError, idArchSuffix, archMismatchFor, humanizeMissingAppError, humanizeBrewError } from "../lib/engine.js";
 import { psQuote, ELEVATION_CANCELLED, isElevated } from "../lib/elevate.js";
 import {
   applicationDirs,
+  caskAppMissing,
   parseCaskCatalog,
   pickCask,
   normalizeAppKey,
@@ -1520,6 +1521,101 @@ group("1.3.17：架构不匹配与自更新保护");
   ok(/arch-mismatch/.test(src) && /arch-mismatch/.test(cli), "扫描与前端都标出架构不匹配");
   ok(/SELF_UPDATE_IDS/.test(src) && /host-restart/.test(src), "DSH 自更新走 host-restart 分支");
   ok(/安装程序返回 1/.test(explainInstallerExitCode(1, "")), "退出码 1 给出可操作解释");
+}
+
+group("1.3.18：孤儿 cask 判定（声明了 .app 但磁盘已丢失）");
+{
+  /* 用假 exists 精确控制「磁盘上有哪些 .app」，纯函数、跨平台可复现。 */
+  const catalogThunder = parseCaskCatalog([
+    {
+      token: "thunder",
+      version: "5.80.9.66681",
+      name: ["Thunder"],
+      artifacts: [{ app: ["Thunder.app"], target: "/Applications/Thunder.app" }],
+    },
+    { token: "font-jetbrains-mono", version: "2.304", name: ["JetBrains Mono"], artifacts: [] },
+  ]);
+  const thunder = catalogThunder.byToken.get("thunder");
+  ok(Array.isArray(thunder.appTargets) && thunder.appTargets[0] === "/Applications/Thunder.app", "cask 的显式 target 绝对路径被记录", thunder && thunder.appTargets);
+  ok(Array.isArray(thunder.appNames) && thunder.appNames[0] === "Thunder.app", "cask 的 app 文件名仍照常记录");
+
+  const noneExists = () => false;
+  const orphan = caskAppMissing(thunder, noneExists);
+  ok(orphan.orphan === true, "声明的 .app 目标全部不存在 → 判为孤儿");
+  ok(orphan.missingPaths.length === 1 && orphan.missingPaths[0] === "/Applications/Thunder.app", "孤儿带出缺失路径", orphan.missingPaths);
+
+  const existsAtTarget = (p) => p === "/Applications/Thunder.app";
+  ok(caskAppMissing(thunder, existsAtTarget).orphan === false, "目标路径存在 → 不是孤儿");
+
+  /* 没有显式 target 时按 applicationDirs() 里的文件名找 */
+  const noTarget = parseCaskCatalog([
+    { token: "foo", version: "2.0", name: ["Foo"], artifacts: [{ app: ["Foo.app"] }] },
+  ]).byToken.get("foo");
+  const onlyUserApp = (p) => p.endsWith("/Applications/Foo.app") && p.startsWith("/Users/") === false;
+  ok(caskAppMissing(noTarget, () => false).orphan === true, "无 target 时：标准目录里全找不到 → 孤儿");
+  ok(caskAppMissing(noTarget, onlyUserApp).orphan === false, "无 target 时：/Applications 下找到 → 不是孤儿");
+  ok(caskAppMissing(noTarget, () => false).missingPaths.length === applicationDirs().length, "无 target 时逐个标准目录都列为候选", caskAppMissing(noTarget, () => false).missingPaths.length);
+
+  const font = catalogThunder.byToken.get("font-jetbrains-mono");
+  ok(caskAppMissing(font, () => false).orphan === false, "字体 / 命令行 cask（无 .app artifact）绝不判为孤儿");
+  ok(caskAppMissing(null, () => false).orphan === false, "空条目不判为孤儿");
+
+  /* 核心回归：这类 cask 必须从「可一键更新」里摘除，但字体 cask 行为逐字不变。 */
+  const built = buildMacosItems({
+    apps: [],
+    brews: new Map([["thunder", "5.80.8.66675"], ["font-jetbrains-mono", "2.304"]]),
+    outdated: new Map([["thunder", "5.80.9.66681"]]),
+    catalog: catalogThunder,
+    settings: {},
+  });
+  const t = built.items.find((i) => i.id === "brew:thunder");
+  const f = built.items.find((i) => i.id === "brew:font-jetbrains-mono");
+  ok(!!t && t.hasUpdate === false, "孤儿 cask 不再列为可更新（勾得动必然失败的 bug 已修）", t);
+  ok(!!t && t.updateSupported === false, "孤儿 cask 不可一键更新");
+  ok(!!t && t.reason === "app-missing", "孤儿 cask 标为 app-missing");
+  ok(!!t && t.available === "", "孤儿 cask 不再给出可升级目标版本");
+  ok(!!t && Array.isArray(t.missingPaths) && t.missingPaths.includes("/Applications/Thunder.app"), "孤儿行带出缺失路径供清理/提示使用");
+  ok(!!f && f.reason === null, "同批次的字体 cask 不受影响（reason 仍为 null）", f);
+  ok(built.items.filter((i) => i.hasUpdate).length === 0, "整批没有可一键更新项");
+  ok(!built.warnings.some((w) => /失败|错误/.test(w)), "孤儿摘除不产生红色告警横幅（属自动处理的正常状态）");
+
+  /* app 在磁盘上时（模拟真实存在的场景）不受影响 */
+  const existing = buildMacosItems({
+    apps: [{ path: "/Applications/Thunder.app", bundleName: "Thunder.app", name: "Thunder", version: "5.80.8.66675", bundleId: "com.xunlei.Thunder", appStore: false, system: false }],
+    brews: new Map([["thunder", "5.80.8.66675"]]),
+    outdated: new Map([["thunder", "5.80.9.66681"]]),
+    catalog: catalogThunder,
+    settings: {},
+  });
+  const et = existing.items.find((i) => i.id === "brew:thunder");
+  ok(!!et && et.hasUpdate === true && et.reason === null, "app 真实存在时仍正常报可更新（不误伤）", et);
+}
+
+group("1.3.18：brew 报错中文化（It seems the App source ... is not there.）");
+{
+  const raw = "Error: thunder: It seems the App source '/Applications/Thunder.app' is not there.";
+  const zh = humanizeMissingAppError(raw);
+  ok(/应用文件已不在磁盘/.test(zh), "命中特定句式 → 给出中文说明", zh);
+  ok(zh.includes("/Applications/Thunder.app"), "中文说明保留缺失路径");
+  ok(/brew uninstall --cask/.test(zh) && /brew install --cask --force/.test(zh), "中文说明给出清理与重装两条可操作命令");
+  ok(/brew uninstall --cask thunder/.test(zh) && !/<token>/.test(zh), "命令里带上真实 cask token，可直接复制执行", zh);
+  ok(!/It seems the App source/.test(zh), "不再把英文原文透给用户");
+  ok(humanizeBrewError(raw) === zh, "统一出口命中语义化文案");
+
+  ok(humanizeMissingAppError("Error: checksum mismatch") === "", "非该句式返回空串（不泛化翻译）");
+  ok(humanizeBrewError("Error: checksum mismatch") === "Error: checksum mismatch", "其它错误逐字原样保留");
+  ok(humanizeMissingAppError("") === "", "空输入安全");
+
+  /* 源码契约：两个失败出口都走 humanizeBrewError，扫描侧执行 brew uninstall 清理 */
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../lib/engine.js"), "utf8");
+  ok(/humanizeBrewError\(brewErrorLine\(upRes\)\)/.test(src), "upgrade 失败出口接上语义化");
+  ok(/humanizeBrewError\(brewErrorLine\(res\)\)/.test(src), "fetch 失败出口接上语义化");
+  ok(/\["uninstall", "--cask", token\]/.test(src), "扫描侧用 brew uninstall --cask 清理残留记账");
+  ok(/cleanedResidual/.test(src), "清理成功写 cleanedResidual 标记");
+  ok(/app-missing/.test(src), "engine 侧按 app-missing 定位孤儿行");
+  const cli = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../lib/client.js"), "utf8");
+  ok(/"app-missing"/.test(cli), "前端补上 app-missing 文案");
+  ok(/残留已清理|应用已缺失/.test(cli), "前端给出独立状态文案");
 }
 
 /* ---------------- 结果 ---------------- */

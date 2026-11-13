@@ -91,8 +91,11 @@ dsh-app-updater/
   "installLocation": "C:\\Program Files\\Google\\Chrome\\Application",
   "hasUpdate": true,
   "updateSupported": true,          // 本插件能否驱动更新
-  "reason": null,                   // null | "not-in-catalog" | "not-managed" | "unknown-version" | "pinned" | "store-managed" | "system-component"
-  "kind": "exe"                     // exe | msi | msix | inno | cask | app | null（未知）
+  "reason": null,                   // null | "not-in-catalog" | "not-managed" | "unknown-version" | "pinned" | "store-managed" | "system-component" | "arch-mismatch" | "app-missing"
+  "kind": "exe",                    // exe | msi | msix | inno | cask | app | null（未知）
+  // 1.3.18 起，仅 `reason: "app-missing"` 的行额外带：
+  "missingPaths": ["/Applications/Thunder.app"],  // 磁盘上找不到、但 cask 声明过的 .app 路径
+  "cleanedResidual": true          // 可选：本次扫描是否已自动清掉 Homebrew 残留记账
 }
 ```
 
@@ -100,6 +103,13 @@ dsh-app-updater/
 （拖 DMG / 手动安装），所以能列出、不能一键更新。`source` 的 `app` / `appstore` 同理只出现在
 macOS。macOS 的扫描范围是 `/Applications`、`/Applications/Utilities`、`/System/Applications`
 （及其 `Utilities`）与 `~/Applications`；装在别处的应用不在范围内。
+
+`reason: "app-missing"`（1.3.18）：Homebrew 仍记着这个 cask，但 cask 声明的 `.app` 在磁盘上
+已全部不存在（用户删掉 / 移走了应用）。`brew upgrade` 会在卸载旧版阶段报
+`It seems the App source '...' is not there.` 并失败，因此这类行**不再**标为可更新
+（`hasUpdate=false`、`updateSupported=false`、`available=""`），扫描时另尝试用
+`brew uninstall --cask <token>` 自动清理残留记账（尽力而为，失败不影响扫描结果）。
+字体 / 命令行等没有 `.app` artifact 的 cask 不受此判定影响。
 
 ### POST /dsh-app-updater/scan
 

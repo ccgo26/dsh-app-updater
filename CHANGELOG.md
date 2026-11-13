@@ -2,6 +2,62 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.3.18] — 2026-11-13
+
+### 修复：macOS「应用已删除但 Homebrew 仍记账」被误报为可一键更新
+
+现场（本机 Apple Silicon / Homebrew 7.0.13）：设置 → 应用更新 → 上次更新
+`成功 0 / 1（1 个失败）`，红字为
+`Thunder — Error: thunder: It seems the App source '/Applications/Thunder.app' is not there.`；
+下方列表却仍把 `Thunder` 标成「有新版本 5.80.9.66681 / 可更新」。
+
+根因链（逐条本机实测）：
+
+- `/Applications/Thunder.app` 不存在，`mdfind kMDItemCFBundleIdentifier ==
+  'com.xunlei.Thunder'` 无结果，`Caskroom/thunder/5.80.8.66675/` 是空目录；
+  但 `brew list --cask --versions thunder` 仍返回 `thunder 5.80.8.66675`。
+  即：用户把应用删了，Homebrew 的记账残留。
+- `brew outdated --greedy` 依那份残留记账报出新版 → `buildMacosItems` 的
+  「brew 已装但标准目录里没找到 .app」兜底分支（本为字体 / 命令行 cask 而设）
+  无条件把它列成 `hasUpdate=true / updateSupported=true`，造成
+  **「勾得动、点下去必然失败」**。
+- `brew upgrade --cask thunder` 在卸载旧版阶段要备份 cask 声明的 `.app`
+  （Homebrew `cask/artifact/moved.rb` 的 `move_back`），文件不在即抛
+  `CaskError: It seems the App source ... is not there.`。插件的 `brewErrorLine()`
+  如实把这句英文透给用户。
+
+本版改动（**只动 macOS 路径**，Windows 逐字不变）：
+
+- **精确识别孤儿 cask**：`parseCaskCatalog` 额外记录 cask 的 `.app` 目标
+  （显式 `target` 绝对路径优先，否则按 `applicationDirs()` 拼文件名）；
+  新增纯函数 `caskAppMissing(entry, exists)`。只对**声明了 `.app` 且全部目标
+  路径都不存在**的 cask 判为孤儿；字体 / 命令行 cask（无 `.app` artifact）
+  与 app 真实存在的行逐字保持原行为。
+- **摘除可更新**：孤儿行改为 `hasUpdate=false` / `updateSupported=false` /
+  `available=""` / `reason="app-missing"`，并带 `missingPaths`。不再进
+  「全部更新」队列，也不计入 `stats.upgradable`。
+- **自动清理残留记账**：扫描阶段对孤儿行执行
+  `brew uninstall --cask <token>`（Homebrew 自己的清理路径），成功写
+  `cleanedResidual: true`，下次扫描自然不再出现。**尽力而为**：Homebrew 的
+  purge 在 `Caskroom` 父目录不可写时会走 `sudo -E /bin/rm`，后台进程没有终端
+  给 sudo 输密码，可能返回 127；此时只写一条 info 日志，不进 `warnings`
+  （不制造红色告警横幅）、不抛错、不阻断扫描，界面给出可复制的终端命令兜底。
+- **错误文案中文化**：新增 `humanizeMissingAppError()` / `humanizeBrewError()`，
+  把 `It seems the App source '...' is not there.` 换成中文说明（保留缺失路径，
+  给出 `brew uninstall --cask` 与 `brew install --cask --force` 两条命令）；
+  只匹配这一条特定句式，其它 Homebrew 报错逐字原样透出。`brew fetch` 与
+  `brew upgrade/install` 两个失败出口都接上。
+- **界面独立状态**：`app-missing` 行显示「应用已缺失」/「残留已清理」，
+  悬停说明原因与下一步，不再落到「已是最新」或「不可判断」被误读。
+
+### 兼容性
+
+- `apps.items[]` 仅对 `reason: "app-missing"` 的行新增可选 `missingPaths` /
+  `cleanedResidual` 字段；其余字段、`state.json` 结构、设置项、API 全部不变。
+- Windows 路径零改动；`npm test` = unit 482 / render 94 / deny 16 全绿。
+- 验证：用本机真实 `cask-catalog.json` + brew 真实数据回放，现场 thunder 从
+  「有新版本」正确变为 `app-missing` 且不再可勾选。
+
 ## [1.3.17] — 2026-11-12
 
 ### 修复：Windows 更新「4 项全失败」与重复兜底报错
