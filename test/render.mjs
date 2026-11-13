@@ -228,6 +228,11 @@ const storage = makeStorage();
 const calls = [];
 let statePayload = null;
 let settingsResponse = { ok: true };
+/* 1.4.0：版本信息区交互的可编程响应（检查更新 / 自更新）。
+   每个场景改这两个变量即可模拟「有新版本 / 无新版本 / 失败 / 挂起」。 */
+let checkUpdateResponse = { ok: true, hasUpdate: false, currentVersion: "1.4.0", latestVersion: "1.4.0" };
+let selfUpdateResponse = { ok: true, message: "已更新到 v1.5.0" };
+let checkUpdateDeferred = null; // 非 null 时模拟「进行中」，返回永不 resolve 的 Promise
 
 function jsonResponse(obj, status = 200) {
   return {
@@ -243,6 +248,18 @@ async function fakeFetch(url, init) {
   if (u.endsWith("/state.json")) {
     if (!statePayload) return jsonResponse({ ok: true, platform: "win32", phase: "idle", settings: {}, apps: { items: [], stats: {} }, csrfToken: "test-csrf-token-0123456789abcdef" });
     return jsonResponse(statePayload);
+  }
+  /* 1.4.0：检查更新与自更新路由的模拟。checkUpdateDeferred 用于验证「进行中禁止重复点击」。 */
+  if (u.endsWith("/check-update")) {
+    if (checkUpdateDeferred) return checkUpdateDeferred.promise;
+    return jsonResponse(checkUpdateResponse);
+  }
+  if (u.endsWith("/self-update")) {
+    let body = {};
+    try { body = JSON.parse((init && init.body) || "{}"); } catch (e) { body = {}; }
+    const expected = (statePayload && statePayload.csrfToken) || "test-csrf-token-0123456789abcdef";
+    if (body.csrfToken !== expected) return jsonResponse({ ok: false, error: "CSRF 校验失败" }, 403);
+    return jsonResponse(selfUpdateResponse);
   }
   if (u.endsWith("/settings") || u.endsWith("/scan") || u.endsWith("/update") || u.endsWith("/cancel") || u.endsWith("/open-downloads")) {
     let body = {};
@@ -925,6 +942,179 @@ group("1.3.15 i18n / a11y");
   ok(/aria-current/.test(src), "分段筛选带 aria-current");
   ok(/"aria-selected": checked/.test(src), "表格行 aria-selected 与勾选联动");
   ok(/aria-label": tr\("tableLabel"/.test(src), "表格带 aria-label");
+}
+
+/* ---------------- 1.4.0：版本信息区交互 ---------------- */
+/* 复用现有迷你 React：每个场景重置 hooks、设置可编程响应、重新渲染后点击版本区按钮。
+   断言按钮标签、提示文案、以及「立即更新」是否只在有新版时出现。 */
+function resetVerScenario(payload, check, self) {
+  statePayload = payload;
+  checkUpdateResponse = check;
+  selfUpdateResponse = self || { ok: true, message: "已更新到 v9.9.9" };
+  checkUpdateDeferred = null;
+  calls.length = 0;
+  rt.reset();
+}
+function verBtn(tree) {
+  return byClass(tree, "appupd-version-btn")[0];
+}
+function verText(tree) {
+  return textOf(byClass(tree, "appupd-version")[0] || tree);
+}
+async function renderVer() {
+  let t = rt.render();
+  await tick();
+  await tick();
+  t = rt.render(); // refresh() 落地 state 后再渲染一次
+  return t;
+}
+
+const VER_BASE = () => baseState({ pluginInfo: { version: "1.4.0", updatedAt: "2026-11-13", packageName: "dsh-app-updater" } });
+
+group("1.4.0 版本信息展示");
+{
+  resetVerScenario(VER_BASE(), { ok: true, hasUpdate: false, currentVersion: "1.4.0", latestVersion: "1.4.0" });
+  let t = await renderVer();
+  const panel = byClass(t, "appupd-version");
+  ok(panel.length === 1, "界面渲染出版本信息区");
+  ok(textOf(panel[0]).includes("v1.4.0") && textOf(panel[0]).includes("2026-11-13"), "显示版本号与更新时间", textOf(panel[0]));
+  // 版本信息区必须是根节点最后一个子节点
+  const root = byClass(t, "appupd-root")[0];
+  const last = (root.children || [])[root.children.length - 1];
+  ok(last && cls(last).includes("appupd-version"), "版本信息区位于界面最下方");
+  ok(textOf(verBtn(t)) === "检查更新", "初始按钮为「检查更新」");
+  ok(!textOf(t).includes("立即更新"), "初始不出现「立即更新」");
+}
+
+group("1.4.0 情况一：有新版本 → 按钮变「立即更新」");
+{
+  resetVerScenario(VER_BASE(), { ok: true, hasUpdate: true, currentVersion: "1.4.0", latestVersion: "1.5.0" });
+  let t = await renderVer();
+  verBtn(t).props.onClick();
+  await tick();
+  t = rt.render();
+  ok(textOf(verBtn(t)) === "立即更新", "检出新版本后按钮变为「立即更新」");
+  ok(verText(t).includes("发现新版本 v1.5.0"), "显示新版本提示", verText(t));
+  ok(byClass(t, "appupd-version-new").length === 1, "新版本提示配色生效");
+}
+
+group("1.4.0 情况二：无新版本 → 明确提示已是最新，按钮保持「检查更新」");
+{
+  resetVerScenario(VER_BASE(), { ok: true, hasUpdate: false, currentVersion: "1.4.0", latestVersion: "1.4.0" });
+  let t = await renderVer();
+  verBtn(t).props.onClick();
+  await tick();
+  t = rt.render();
+  ok(textOf(verBtn(t)) === "检查更新", "无新版本时按钮仍为「检查更新」");
+  ok(verText(t).includes("当前已是最新版本"), "明确提示当前已是最新版本", verText(t));
+  ok(!textOf(t).includes("立即更新"), "无新版本时不出现「立即更新」");
+}
+
+group("1.4.0 情况三：检查失败后重试");
+{
+  resetVerScenario(VER_BASE(), { ok: false, error: "检查更新失败：网络不可达" });
+  let t = await renderVer();
+  verBtn(t).props.onClick();
+  await tick();
+  t = rt.render();
+  ok(textOf(verBtn(t)) === "重试", "检查失败后按钮变为「重试」");
+  ok(verText(t).includes("检查更新失败"), "给出失败提示", verText(t));
+  ok(verText(t).includes("可点击重试") || textOf(verBtn(t)) === "重试", "提示可重试");
+  // 重试时改为「有新版本」，验证失败态不残留、重试能正确恢复
+  checkUpdateResponse = { ok: true, hasUpdate: true, currentVersion: "1.4.0", latestVersion: "1.6.0" };
+  verBtn(t).props.onClick();
+  await tick();
+  t = rt.render();
+  ok(textOf(verBtn(t)) === "立即更新", "失败后重试成功 → 切到「立即更新」");
+  ok(!verText(t).includes("检查更新失败"), "失败提示已清除，不再残留", verText(t));
+}
+
+group("1.4.0 情况四：进行中禁止重复点击");
+{
+  let resolveDeferred;
+  checkUpdateDeferred = { promise: new Promise((r) => { resolveDeferred = r; }) };
+  resetVerScenario(VER_BASE(), { ok: true, hasUpdate: false, currentVersion: "1.4.0", latestVersion: "1.4.0" });
+  // resetVerScenario 会清掉 deferred，重新挂上
+  checkUpdateDeferred = { promise: new Promise((r) => { resolveDeferred = r; }) };
+  let t = await renderVer();
+  const before = calls.filter((c) => c.url.endsWith("/check-update")).length;
+  verBtn(t).props.onClick(); // 第一次点击 → 进入检查中
+  await tick();
+  t = rt.render();
+  ok(textOf(verBtn(t)) === "检查中…", "检查过程中按钮显示「检查中…」");
+  ok(verBtn(t).props.disabled === true, "检查过程中按钮被禁用");
+  ok(verBtn(t).props["aria-busy"] === "true", "检查过程中 aria-busy 为 true");
+  // 进行中再点两次（模拟用户连续点击）
+  verBtn(t).props.onClick();
+  verBtn(t).props.onClick();
+  await tick();
+  t = rt.render();
+  const during = calls.filter((c) => c.url.endsWith("/check-update")).length;
+  ok(during === before + 1, "进行中重复点击不会发起第二次请求（只发 1 次）", { before, during });
+  ok(textOf(verBtn(t)) === "检查中…", "进行中按钮文案不被重复点击改写");
+  // 放行挂起的请求，验证能正常收尾
+  resolveDeferred(jsonResponse({ ok: true, hasUpdate: false, currentVersion: "1.4.0", latestVersion: "1.4.0" }));
+  await tick();
+  await tick();
+  t = rt.render();
+  ok(textOf(verBtn(t)) === "检查更新", "请求结束后按钮恢复可点击的「检查更新」");
+  ok(verBtn(t).props.disabled !== true, "请求结束后按钮解除禁用");
+}
+
+group("1.4.0 状态切换正确性：更新完成 / 重新检查无新版 不残留「立即更新」");
+{
+  // ① 先检出新版本
+  resetVerScenario(VER_BASE(), { ok: true, hasUpdate: true, currentVersion: "1.4.0", latestVersion: "1.5.0" });
+  let t = await renderVer();
+  verBtn(t).props.onClick();
+  await tick();
+  t = rt.render();
+  ok(textOf(verBtn(t)) === "立即更新", "前置：出现「立即更新」");
+  // ② 点「立即更新」→ 完成后应回到「检查更新」，且不残留
+  selfUpdateResponse = { ok: true, message: "已更新到 v1.5.0" };
+  verBtn(t).props.onClick();
+  await tick();
+  await tick();
+  t = rt.render();
+  ok(textOf(verBtn(t)) === "检查更新", "更新完成后按钮回到「检查更新」");
+  ok(!textOf(t).includes("立即更新"), "更新完成后不残留「立即更新」");
+  ok(verText(t).includes("已更新到 v1.5.0"), "给出更新完成提示", verText(t));
+
+  // ③ 再次检出新版本，然后重新检查判定无新版本 → 必须清掉「立即更新」
+  resetVerScenario(VER_BASE(), { ok: true, hasUpdate: true, currentVersion: "1.4.0", latestVersion: "1.5.0" });
+  t = await renderVer();
+  verBtn(t).props.onClick();
+  await tick();
+  t = rt.render();
+  ok(textOf(verBtn(t)) === "立即更新", "前置：再次出现「立即更新」");
+  checkUpdateResponse = { ok: true, hasUpdate: false, currentVersion: "1.4.0", latestVersion: "1.4.0" };
+  // 强制从「检查更新」态重新走一次检查（模拟用户点检查更新）
+  // 通过重试路径：先把状态打回 idle 的方式是触发一次失败→重试，这里直接复用按钮当前动作
+  // 「立即更新」态下按钮执行自更新；要模拟「重新检查」，用 alreadyCurrent 让宿主清态：
+  selfUpdateResponse = { ok: true, alreadyCurrent: true, message: "当前已是最新版本，无需更新" };
+  verBtn(t).props.onClick();
+  await tick();
+  await tick();
+  t = rt.render();
+  ok(textOf(verBtn(t)) === "检查更新", "重新判定无新版后回到「检查更新」");
+  ok(!textOf(t).includes("立即更新"), "重新判定无新版后不残留「立即更新」");
+}
+
+group("1.4.0 自更新失败：给出失败提示并允许重试");
+{
+  resetVerScenario(VER_BASE(), { ok: true, hasUpdate: true, currentVersion: "1.4.0", latestVersion: "1.5.0" });
+  let t = await renderVer();
+  verBtn(t).props.onClick();
+  await tick();
+  t = rt.render();
+  selfUpdateResponse = { ok: false, error: "更新失败：dsh 未找到" };
+  verBtn(t).props.onClick();
+  await tick();
+  await tick();
+  t = rt.render();
+  ok(verText(t).includes("更新失败"), "自更新失败给出失败提示", verText(t));
+  ok(textOf(verBtn(t)) === "重试", "自更新失败后按钮为「重试」");
+  ok(!textOf(t).includes("立即更新"), "自更新失败后不残留「立即更新」");
 }
 
 console.log(`\n${failures === 0 ? "全部通过" : "存在失败"}：${checks - failures}/${checks}`);

@@ -177,6 +177,24 @@ curl -X POST -H "Content-Type: application/json" \
 
 > 这些路由**默认拒绝**：请求必须通过宿主的 `connection` 准入（浏览器里就是带上 DSH 页面的会话
 > Cookie），或在**没有 `connection` 服务的旧宿主**上由你显式开启兼容模式（见「安全边界」）。
+
+## 版本信息与插件自更新（1.4.0）
+
+设置页 `应用更新` 面板的**最下方**有一块版本信息区，显示本插件的 `version` 与
+`CHANGELOG.md` 顶部的「最新更新时间」。旁边一个按钮完成整套交互：
+
+- 点「检查更新」→ 宿主查询 npm 官方源
+  `https://registry.npmjs.org/dsh-app-updater/latest` 并与当前版本比对；
+- 有新版 → 按钮变「立即更新」，点它执行
+  `dsh plugin --profile web add dsh-app-updater@<新版>` 完成自更新；
+- 无新版 → 明确提示「当前已是最新版本」，按钮保持「检查更新」；
+- 检查 / 更新进行中按钮禁用并显示进行中文案，不会重复发请求；
+- 失败给出原因并显示「重试」；更新完成或重新检查判定无新版后，按钮回到「检查更新」。
+
+版本数据源：当前版本取 `package.json` 的 `version`，更新时间取 `CHANGELOG.md` 顶部日期，
+由 `GET /dsh-app-updater/state.json` 的 `pluginInfo` 只读下发。检查走
+`GET /dsh-app-updater/check-update`，执行走 `POST /dsh-app-updater/self-update`（同样要求
+`confirm:true` + `csrfToken`）。接口细节见 [CONTRACT.md](CONTRACT.md)。
 > 仅凭「来自 127.0.0.1」不再放行 —— 1.3.1 已把这条路径改成默认拒绝。
 
 ---
@@ -355,13 +373,14 @@ Edge 走它自带的更新服务：winget 目录里的 `Microsoft.Edge` 是企�
 | `lib/winget.js` | winget 定位与调用、定宽表格解析（CJK 宽度感知） |
 | `lib/registry.js` | 注册表 `Uninstall` 键枚举（PowerShell，UTF-8） |
 | `lib/version.js` | Windows 风格版本比较（含 SemVer `+build` / 尾缀自然序） |
+| `lib/plugin-version.js` | 1.4.0：插件自身版本/时间读取、npm registry 比对、自更新命令构造（纯函数） |
 | `lib/state.js` | 状态与设置持久化（原子写）、CSRF token、跨平台设置裁剪 |
 | `lib/proc.js` | 子进程执行（超时 / AbortSignal / 进程组取消 / StringDecoder） |
 | `lib/macos.js` | macOS 数据层：`.app` 枚举、cask 目录竞速与缓存、列表组装 |
 | `lib/appcast.js` | 非 Homebrew 应用官网更新源（Sparkle / Electron，只读） |
 | `lib/elevate.js` | Windows UAC 提权（临时文件 IPC + 进程树取消） |
 | `lib/platform.js` | 系统 / 架构 / 引擎识别 |
-| `lib/client.js` | 浏览器半身：设置页 UI（设置面板、可拖拽列宽、进度、结果面板与日志；`zh-CN` / `en` 字典） |
+| `lib/client.js` | 浏览器半身：设置页 UI（设置面板、可拖拽列宽、进度、结果面板、日志与最下方版本信息区；`zh-CN` / `en` 字典） |
 | `CONTRACT.md` | 宿主 ↔ 客户端接口契约 |
 | `test/unit.mjs` | 解析器 / 版本 / 清单 / 准入闸门单测（项数以 `npm test` 输出为准） |
 | `test/render.mjs` | 前端渲染与交互自测（项数以 `npm test` 输出为准） |

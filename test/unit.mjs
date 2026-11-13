@@ -44,6 +44,17 @@ import {
   checkAppUpdateSources,
 } from "../lib/appcast.js";
 import { admissionGate, hasConnectionCredentials, resolveLegacyLoopbackOptIn, isCrossSiteBrowserRequest, LEGACY_LOOPBACK_ENV } from "../lib/index.js";
+import {
+  currentVersion,
+  pluginVersionInfo,
+  latestUpdateDate,
+  parseRegistryLatest,
+  evaluateUpdate,
+  isSafeVersionArg,
+  buildSelfUpdateCommand,
+  findDshCli,
+  REGISTRY_LATEST_URL,
+} from "../lib/plugin-version.js";
 import { settingAppliesTo, Store, defaultSettings } from "../lib/state.js";
 import {
   detectEnvironment,
@@ -1616,6 +1627,52 @@ group("1.3.18：brew 报错中文化（It seems the App source ... is not there.
   const cli = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../lib/client.js"), "utf8");
   ok(/"app-missing"/.test(cli), "前端补上 app-missing 文案");
   ok(/残留已清理|应用已缺失/.test(cli), "前端给出独立状态文案");
+}
+
+/* ---------------- 1.4.0：插件版本信息与更新判断 ---------------- */
+console.log("\n1.4.0 版本信息 / 更新判断");
+{
+  ok(/^\d+\.\d+\.\d+/.test(currentVersion()), "currentVersion 从 package.json 读到 semver", currentVersion());
+  const info = pluginVersionInfo();
+  ok(info.version === currentVersion(), "pluginInfo.version 与 currentVersion 一致");
+  ok(/^\d{4}-\d{2}-\d{2}$/.test(info.updatedAt), "pluginInfo.updatedAt 是 CHANGELOG 顶部日期", info.updatedAt);
+  ok(info.packageName === "dsh-app-updater", "packageName 正确");
+
+  ok(latestUpdateDate("## [1.4.0] — 2026-11-13\n\n内容") === "2026-11-13", "解析 em dash 日期");
+  ok(latestUpdateDate("## [1.2.0] - 2025-01-02") === "2025-01-02", "解析普通连字符日期");
+  ok(latestUpdateDate("没有标题") === "", "无匹配返回空串（不编造）");
+
+  ok(parseRegistryLatest('{"name":"dsh-app-updater","version":"1.5.0"}') === "1.5.0", "解析 registry JSON 字符串");
+  ok(parseRegistryLatest({ version: "1.5.0" }) === "1.5.0", "解析 registry 对象");
+  ok(parseRegistryLatest("not json") === "", "非法 JSON 返回空串");
+  ok(parseRegistryLatest({ version: "Unknown" }) === "", "非版本值返回空串");
+  ok(parseRegistryLatest({}) === "", "缺 version 返回空串");
+
+  const has = evaluateUpdate("1.4.0", "1.5.0");
+  ok(has.ok && has.hasUpdate === true, "远端 1.5.0 > 本地 1.4.0 → 有新版本", has);
+  const none = evaluateUpdate("1.4.0", "1.4.0");
+  ok(none.ok && none.hasUpdate === false, "版本相同 → 无新版本", none);
+  const older = evaluateUpdate("1.5.0", "1.4.0");
+  ok(older.ok && older.hasUpdate === false, "远端更旧 → 无新版本（不降级）", older);
+  const badLocal = evaluateUpdate("", "1.5.0");
+  ok(!badLocal.ok && !badLocal.hasUpdate, "本地版本读不到 → 判失败，不谎报有新版本", badLocal);
+  const badRemote = evaluateUpdate("1.4.0", "");
+  ok(!badRemote.ok && !badRemote.hasUpdate, "远端版本查不到 → 判失败，不谎报已是最新", badRemote);
+  const pre = evaluateUpdate("1.4.0", "1.4.0-beta.1");
+  ok(pre.ok && pre.hasUpdate === false, "预发布版本不高于正式版", pre);
+
+  ok(isSafeVersionArg("1.4.0") && isSafeVersionArg("1.4.0-beta.2"), "合法版本参数");
+  ok(!isSafeVersionArg("1.4.0; rm -rf /") && !isSafeVersionArg("$(whoami)") && !isSafeVersionArg(""), "挡住命令注入");
+
+  const cmd = buildSelfUpdateCommand("1.5.0", "/opt/homebrew/bin/dsh");
+  ok(cmd && cmd.exe === "/opt/homebrew/bin/dsh", "自更新命令构造：可执行文件");
+  ok(cmd && cmd.args.join(" ") === "plugin --profile web add dsh-app-updater@1.5.0", "自更新命令参数数组（不经 shell）", cmd && cmd.args);
+  ok(buildSelfUpdateCommand("1.5.0; rm", "/opt/homebrew/bin/dsh") === null, "非法版本不构造命令");
+  ok(buildSelfUpdateCommand("1.5.0", "") === null, "缺 dsh 路径不构造命令");
+
+  ok(findDshCli({ env: { PATH: "" }, exists: () => false }) === "", "PATH 找不到 dsh 返回空串");
+  ok(findDshCli({ env: { PATH: "/x/y" }, exists: (p) => p === "/x/y/dsh" }) === "/x/y/dsh", "从 PATH 找到 dsh");
+  ok(REGISTRY_LATEST_URL.includes("registry.npmjs.org"), "检查源是 npm 官方 registry");
 }
 
 /* ---------------- 结果 ---------------- */

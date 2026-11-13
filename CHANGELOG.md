@@ -2,6 +2,56 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.4.0] — 2026-11-13
+
+### 新增：插件界面底部「版本信息」区（版本展示 / 检查更新 / 立即更新）
+
+在设置页 `应用更新` 面板的**最下方**新增一块独立区域，只影响这一块，其余界面逐字不变。
+三项来源与路径（按需求确认后实现，未自行编造）：
+
+- **版本与更新时间的来源**：`version` 取 `package.json` 的 `version` 字段（沿用宿主既有的
+  `PLUGIN_VERSION` 单一来源约定）；「最新更新时间」取 `CHANGELOG.md` 顶部形如
+  `## [1.4.0] — 2026-11-13` 的日期。浏览器无法 `require`，因此由宿主 `GET /state.json`
+  新增只读字段 `pluginInfo: { version, updatedAt, packageName }` 下发。
+- **需要修改的文件**：`lib/client.js`（`AppUpdaterSection`，注册在 `settings.section` slot）。
+  版本区以 `versionPanel` 追加在根节点最后一个子节点（日志区之后），沿用现有 `h()`、
+  `btn` 风格与 `appupd-` 前缀 CSS，不新增运行时依赖。
+- **更新检查的数据源**：宿主新增只读路由 `GET /dsh-app-updater/check-update`，请求
+  `https://registry.npmjs.org/dsh-app-updater/latest`，用 `lib/version.js` 的 `isNewer()`
+  与当前版本比对。新增纯函数模块 `lib/plugin-version.js` 集中读取、解析、比对与命令构造。
+
+界面交互（单按钮状态机，保存在 `ver` state + `verBusyRef` 锁）：
+
+| 状态 | 按钮 | 行为 |
+|---|---|---|
+| 初始 / 无新版本 | 检查更新 | 发起检查；无新版时明确提示「当前已是最新版本」 |
+| 检查进行中 | 检查中…（禁用 + `aria-busy`） | `verBusyRef` 阻止重复点击，不进行第二次请求 |
+| 检出新版本 | 立即更新（primary） | `hasUpdate` 是「立即更新」出现的**唯一**条件 |
+| 检查 / 更新失败 | 重试 | 给出失败原因提示，点击重新发起检查 |
+| 更新进行中 | 更新中…（禁用） | `POST /self-update` 带 `confirm` + `csrfToken` |
+| 更新完成 / 重新判定无新版 | 检查更新 | 一律清回 `VERSION_IDLE`，`hasUpdate` 不残留 |
+
+状态切换正确性：每次「开始检查」都先把 `hasUpdate / checked / 提示` 清回初值，因此
+「立即更新」只可能来自本次检查的成功结果；更新完成、重新检查判定无新版、失败重试之后
+都回到正确状态，不会错误残留。
+
+宿主「执行更新」：`POST /dsh-app-updater/self-update`（写路由，同样过 `confirm` /
+`csrfToken` / method 闸门）执行
+`dsh plugin --profile web add dsh-app-updater@<version>`（参数数组、不经 shell）。
+宿主做二次裁决：`target` 必须过 semver 白名单且严格新于当前版本，否则不执行安装并返回
+`alreadyCurrent` / 400，防止状态残留被重放导致降级或命令注入。找不到 `dsh` 时返回
+可复制的手工命令文案，不留按钮卡死。
+
+自测覆盖（`npm test`：unit / render / deny 三套全绿）：
+
+- 有新版本 → 按钮变「立即更新」；
+- 无新版本 → 提示「当前已是最新版本」，按钮保持「检查更新」；
+- 检查失败后重试 → 失败提示 + 「重试」，重试成功可正确切到「立即更新」；
+- 进行中重复点击 → 按钮禁用、只发 1 次请求、结束后恢复；
+- 状态残留：更新完成、重新判定无新版、自更新失败后都不残留「立即更新」；
+- 端到端：`state.json` 下发 `pluginInfo`、真实 npm registry 比对、新路由默认拒绝 /
+  `confirm` / `csrfToken` / 非法版本号拦截。
+
 ## [1.3.18] — 2026-11-13
 
 ### 修复：macOS「应用已删除但 Homebrew 仍记账」被误报为可一键更新

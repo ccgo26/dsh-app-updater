@@ -74,7 +74,10 @@ dsh-app-updater/
   // 写接口必须带回的 CSRF token（进程内生成、不落盘）；saveError 为最近一次写盘失败原因
   "csrfToken": "<hex>", "saveError": null,
   // 准入现状，供界面与复核确认当前走哪条路径（默认 "deny" 不会出现在能读到响应的地方）
-  "admission": { "mode": "connection|connection+loopback-legacy|loopback-legacy-optin|deny", "service": true, "allowLegacyLoopback": false, "warning": null }
+  "admission": { "mode": "connection|connection+loopback-legacy|loopback-legacy-optin|deny", "service": true, "allowLegacyLoopback": false, "warning": null },
+  // 1.4.0 起：底部版本信息区数据源（只读）。version 来自 package.json，
+  // updatedAt 来自 CHANGELOG.md 顶部日期，浏览器不直接 require
+  "pluginInfo": { "version": "1.4.0", "updatedAt": "2026-11-13", "packageName": "dsh-app-updater" }
 }
 ```
 
@@ -118,6 +121,37 @@ body `{ "confirm": true, "force": true }` → `{ "ok": true, "started": true }`�
 ### GET /dsh-app-updater/apps.json
 
 `{ "ok": true, "scannedAt": 0, "stats": {...}, "items": [App...], "warnings": ["..."] }`
+
+### GET /dsh-app-updater/check-update（1.4.0，只读）
+
+检查**插件自身**在 npm 上是否有新版本。宿主请求
+`https://registry.npmjs.org/dsh-app-updater/latest`（Node 内置 `fetch` + 12s 超时），
+取 `version` 后用 `lib/version.js` 的 `isNewer()` 与 `package.json` 的 `version` 比对。
+
+```jsonc
+// 成功
+{ "ok": true, "currentVersion": "1.4.0", "latestVersion": "1.5.0", "hasUpdate": true }
+// 成功且无新版本
+{ "ok": true, "currentVersion": "1.4.0", "latestVersion": "1.4.0", "hasUpdate": false }
+// 失败（网络异常 / 非 2xx / 解析不出版本 / 本地版本读不到）
+{ "ok": false, "error": "检查更新失败：..." }
+```
+
+失败一律 `ok:false`，**不谎报「已是最新」**；界面据此给失败提示并允许重试。
+
+### POST /dsh-app-updater/self-update（1.4.0，写路由）
+
+body `{ "confirm": true, "csrfToken": "<来自 state.json>", "target": "1.5.0" }`。
+过与其它写接口相同的 `confirm` / `csrfToken` / `method=POST` 闸门。宿主二次裁决：
+`target` 必须过 semver 白名单（挡命令注入）且严格新于当前版本，否则不执行安装。
+
+- 有新版本且执行成功 → `{ "ok": true, "message": "已更新到 v...", "targetVersion": "1.5.0", ... }`
+- `target` 不新于当前版本 → `{ "ok": true, "alreadyCurrent": true, "message": "当前已是最新版本，无需更新" }`
+- 非法 `target` → `400 { "ok": false, "error": "目标版本号不合法" }`
+- 找不到 `dsh` / 执行失败 / 超时 → `{ "ok": false, "error": "更新失败：..." }`（不卡死按钮）
+
+执行的是 `dsh plugin --profile web add dsh-app-updater@<target>`（参数数组、不经 shell，
+`lib/proc.js` 带 180s 超时与进程组取消）。`--profile web` 与 README 的安装命令一致。
 
 ### POST /dsh-app-updater/update
 
@@ -172,7 +206,11 @@ body `{ "confirm": true, "csrfToken": "<...>", "settings": { ... } }` → `{ "ok
 - `exports.inject = ["slots", "locale"]`
 - 注册 `settings.section`：`{ name: "settings.section", id: "dsh-app-updater", order: 42, label: () => "应用更新" }`
 - 只用 `require("react")`；不引入其它运行时依赖
-- 页面：顶部工具条（刷新检测 / 全部更新 / 取消 / 打开下载目录）+ 统计条 + 可筛选可多选的表格 + 更新结果面板 + 底部日志
+- 页面：顶部工具条（刷新检测 / 全部更新 / 取消 / 打开下载目录）+ 统计条 + 可筛选可多选的表格 + 更新结果面板 + 底部日志 + **最下方版本信息区（1.4.0）**
+- 版本信息区：显示 `pluginInfo.version` 与 `pluginInfo.updatedAt`；单按钮状态机
+  `检查更新 → 检查中… → 立即更新 / 已是最新 / 重试 → 更新中… → 检查更新`。
+  `hasUpdate` 只在「检查成功且远端版本严格更旧」时为真，是「立即更新」出现的唯一条件；
+  进行中禁用按钮并阻止重复请求；失败给提示并允许重试；更新完成 / 重新检查无新版后清回初值。
 - 表格列：勾选 / 应用名 / 已装版本 / 可升级到 / 状态 / 操作（「来源」是状态单元格里的徽章，不是独立列）
 - 所有请求带 `cache: "no-store"`；轮询 state.json（扫描/更新中 **900ms**，空闲 **5000ms**）
   （旧文档写 800ms/4s，与 `lib/client.js:20-21` 不符）
