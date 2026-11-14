@@ -19,7 +19,8 @@ import {
   sliceByWidth,
 } from "../lib/winget.js";
 import { compareVersions, isNewer, looksLikeVersion, splitVersion, compareTails, normalizeVersionKey } from "../lib/version.js";
-import { parseInstallerManifest, splitSwitchArgs, defaultSilentArgs, resolveInstallArgs, parseBrewCaskVersions, parseBrewOutdated, findBrew, isArchNotFoundError, explainInstallerExitCode, evaluateUpdateResult, findEdgeUpdate, updateHintFor, pickInstallerSha256, verifyInstallerHash, sha256File, classifyWingetError, isSourceLevelFailure, formatFallbackError, idArchSuffix, archMismatchFor, humanizeMissingAppError, humanizeBrewError } from "../lib/engine.js";
+import { parseInstallerManifest, splitSwitchArgs, defaultSilentArgs, resolveInstallArgs, parseBrewCaskVersions, parseBrewOutdated, findBrew, isArchNotFoundError, explainInstallerExitCode, evaluateUpdateResult, findEdgeUpdate, updateHintFor, pickInstallerSha256, verifyInstallerHash, sha256File, classifyWingetError, isSourceLevelFailure, formatFallbackError, idArchSuffix, archMismatchFor, humanizeMissingAppError, humanizeBrewError, isRetryableDownloadError } from "../lib/engine.js";
+import { isDownloadSource403, sourceFailedIds, sourceRecoveredIds, mergeSourceFailures, applySourceFailure, MAX_SOURCE_FAILURES } from "../lib/source-failures.js";
 import { psQuote, ELEVATION_CANCELLED, isElevated } from "../lib/elevate.js";
 import {
   applicationDirs,
@@ -55,7 +56,7 @@ import {
   findDshCli,
   REGISTRY_LATEST_URL,
 } from "../lib/plugin-version.js";
-import { settingAppliesTo, Store, defaultSettings } from "../lib/state.js";
+import { settingAppliesTo, Store, defaultSettings, defaultState } from "../lib/state.js";
 import {
   detectEnvironment,
   describeEnvironment,
@@ -1673,6 +1674,62 @@ console.log("\n1.4.0 版本信息 / 更新判断");
   ok(findDshCli({ env: { PATH: "" }, exists: () => false }) === "", "PATH 找不到 dsh 返回空串");
   ok(findDshCli({ env: { PATH: "/x/y" }, exists: (p) => p === "/x/y/dsh" }) === "/x/y/dsh", "从 PATH 找到 dsh");
   ok(REGISTRY_LATEST_URL.includes("registry.npmjs.org"), "检查源是 npm 官方 registry");
+}
+
+/* ---------------- 1.4.1：官网下载源 403 记录与「需手动」降级 ---------------- */
+console.log("\n1.4.1 下载源 403 记录 / 需手动降级 / 重试排除");
+{
+  ok(isDownloadSource403("0x80190193 : Forbidden (403)."), "识别 0x80190193");
+  ok(isDownloadSource403("官网下载源拒绝访问（403 Forbidden）"), "识别语义化中文文案");
+  ok(!isDownloadSource403("安装程序退出码 1"), "本地安装失败不是下载源 403");
+  ok(!isDownloadSource403("哈希不匹配"), "哈希不符不是下载源 403");
+
+  const results = [
+    { id: "NetEase.UURemote", ok: false, error: "官网下载源拒绝访问（403 Forbidden）：发布方 CDN 或清单源不可用" },
+    { id: "Google.Chrome", ok: true, error: null },
+    { id: "Some.App", ok: false, error: "安装程序退出码 1" },
+  ];
+  ok(JSON.stringify(sourceFailedIds(results)) === JSON.stringify(["NetEase.UURemote"]), "只挑出 403 失败项", sourceFailedIds(results));
+  ok(JSON.stringify(sourceRecoveredIds(results)) === JSON.stringify(["Google.Chrome"]), "成功项列入恢复清单", sourceRecoveredIds(results));
+
+  const merged = mergeSourceFailures({}, results, 1000);
+  ok(merged["NetEase.UURemote"] && merged["NetEase.UURemote"].at === 1000, "403 失败落库（带时间戳）", merged);
+  ok(!merged["Google.Chrome"] && !merged["Some.App"], "成功项与非 403 失败不落库");
+
+  const recovered = mergeSourceFailures({ "NetEase.UURemote": { at: 1, reason: "403" } }, [{ id: "NetEase.UURemote", ok: true }], 2000);
+  ok(!recovered["NetEase.UURemote"], "发布方修复/更新成功后清除旧记录");
+
+  const capped = mergeSourceFailures({}, Array.from({ length: MAX_SOURCE_FAILURES + 5 }, (_, i) => ({ id: "P" + i, ok: false, error: "403 Forbidden" })), 1000);
+  ok(Object.keys(capped).length === MAX_SOURCE_FAILURES, "记录数不超过上限", Object.keys(capped).length);
+
+  const row = { id: "NetEase.UURemote", name: "UU远程", version: "4.45.1.4372", available: "4.47.0.5146", hasUpdate: true, updateSupported: true, reason: null };
+  const down = applySourceFailure(row, merged);
+  ok(down.changed === true, "命中记录 → 应用降级");
+  ok(down.item.hasUpdate === true && down.item.updateSupported === false, "保留「有新版」但不可一键更新", down.item);
+  ok(down.item.reason === "source-unavailable", "reason=source-unavailable");
+  ok(down.item.latestNewer === true && down.item.latestVersion === "4.47.0.5146", "带 latestNewer/latestVersion 供「需手动」分段");
+  ok(/403|官网手动/.test(down.item.adoptHint), "给出可操作提示", down.item.adoptHint);
+  ok(row.updateSupported === true, "applySourceFailure 不修改入参");
+  const untouched = applySourceFailure(row, {});
+  ok(untouched.changed === false && untouched.item.updateSupported === true, "无记录时不降级");
+  const notUpdatable = applySourceFailure({ ...row, hasUpdate: false, updateSupported: false }, merged);
+  ok(notUpdatable.changed === false, "本来就不是可一键更新的行不降级");
+
+  // 1.4.1：403 不再被当作网络抖动重试
+  ok(!isRetryableDownloadError({}, "0x80190193 : Forbidden (403)."), "403 不重试（旧逻辑会白跑 2 次）");
+  ok(!isRetryableDownloadError({}, "官网下载源拒绝访问（403 Forbidden）"), "语义化 403 不重试");
+  ok(isRetryableDownloadError({ timedOut: true }, "download timeout"), "真·超时仍重试");
+  ok(isRetryableDownloadError({}, "HTTP 503 Service Unavailable"), "其它 5xx 仍按网络错误处理");
+  ok(!isRetryableDownloadError({}, "No package found matching input criteria"), "找不到包不重试");
+
+  // Store 层：默认状态含 sourceFailures、合并方法与持久化
+  ok(defaultState().sourceFailures && typeof defaultState().sourceFailures === "object", "defaultState 含 sourceFailures 表");
+  const st = new Store();
+  st.state = defaultState();
+  const r1 = st.mergeSourceFailureResults([{ id: "NetEase.UURemote", ok: false, error: "403 Forbidden" }]);
+  ok(r1.added.length === 1 && st.state.sourceFailures["NetEase.UURemote"], "Store 合并 403 失败");
+  const r2 = st.mergeSourceFailureResults([{ id: "NetEase.UURemote", ok: true }]);
+  ok(r2.removed.length === 1 && !st.state.sourceFailures["NetEase.UURemote"], "Store 更新成功后清记录");
 }
 
 /* ---------------- 结果 ---------------- */

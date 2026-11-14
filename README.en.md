@@ -278,6 +278,7 @@ node test/harness.mjs --scan    # boots the host half against a fake cordis ctx 
 | `lib/registry.js` | Registry `Uninstall` enumeration (PowerShell, UTF-8) |
 | `lib/version.js` | Windows-style version comparison |
 | `lib/plugin-version.js` | 1.4.0: plugin version/date lookup, npm registry comparison, self-update command builder |
+| `lib/source-failures.js` | 1.4.1: 403 download-source failure ledger and "needs manual" downgrade (pure functions) |
 | `lib/state.js` | Settings and state persistence (atomic writes) |
 | `lib/proc.js` | Child process runner (timeouts, cancellation, UTF-8) |
 | `lib/client.js` | Browser half: the settings page UI (incl. the bottom version-info section) |

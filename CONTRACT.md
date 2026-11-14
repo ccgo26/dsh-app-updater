@@ -77,7 +77,9 @@ dsh-app-updater/
   "admission": { "mode": "connection|connection+loopback-legacy|loopback-legacy-optin|deny", "service": true, "allowLegacyLoopback": false, "warning": null },
   // 1.4.0 起：底部版本信息区数据源（只读）。version 来自 package.json，
   // updatedAt 来自 CHANGELOG.md 顶部日期，浏览器不直接 require
-  "pluginInfo": { "version": "1.4.0", "updatedAt": "2026-11-13", "packageName": "dsh-app-updater" }
+  "pluginInfo": { "version": "1.4.1", "updatedAt": "2026-11-13", "packageName": "dsh-app-updater" },
+  // 1.4.1：被记下「官网下载源 403」的应用个数（只下发计数，不暴露内部记录表）
+  "sourceFailureCount": 0
 }
 ```
 
@@ -94,7 +96,13 @@ dsh-app-updater/
   "installLocation": "C:\\Program Files\\Google\\Chrome\\Application",
   "hasUpdate": true,
   "updateSupported": true,          // 本插件能否驱动更新
-  "reason": null,                   // null | "not-in-catalog" | "not-managed" | "unknown-version" | "pinned" | "store-managed" | "system-component" | "arch-mismatch" | "app-missing"
+  "reason": null,                   // null | "not-in-catalog" | "not-managed" | "unknown-version" | "pinned" | "store-managed" | "system-component" | "arch-mismatch" | "app-missing" | "source-unavailable"(1.4.1)
+  // 1.4.1：reason="source-unavailable" 的行额外带（上次更新时官网下载源返回 403）：
+  "latestNewer": true,             // 让它落进「需手动」分段并被「未收录」排除
+  "latestVersion": "4.47.0.5146",
+  "latestVia": "source-failure",
+  "adoptHint": "发布方下载源返回 403……请等待发布方修复，或到官网手动下载新版安装",
+  "sourceFailedAt": 1794563752223
   "kind": "exe",                    // exe | msi | msix | inno | cask | app | null（未知）
   // 1.3.18 起，仅 `reason: "app-missing"` 的行额外带：
   "missingPaths": ["/Applications/Thunder.app"],  // 磁盘上找不到、但 cask 声明过的 .app 路径
@@ -163,6 +171,11 @@ Homebrew 下载缓存、并发度 3；Windows 用 `winget download` 私有目录
 逐条：校验哈希（Windows）→ 静默安装（需要管理员时自动提权）→ 复核版本。
 安装仍严格串行（安装锁互斥）。Edge 由 `MicrosoftEdgeUpdate.exe /ua` 处理。
 `settings.dryRun` 时只下载、不安装、不复核。）
+
+1.4.1 起，任务收尾会把「官网下载源 403」失败按 id 记进 `state.json` 的
+`sourceFailures`（宿主内部，最多 200 条）；下一次扫描读取它，把命中行标为
+`reason="source-unavailable"` / 「需手动」（见 `apps.items[]`），不再进「可一键更新」。
+该 id 后续更新成功即清除记录、自动恢复。`winget download` 对 403 不再重试。
 
 `update.results[]`（每条一次更新）：
 

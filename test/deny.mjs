@@ -181,6 +181,7 @@ ok(
   "state.json 下发 pluginInfo（version + updatedAt）",
   verState.pluginInfo
 );
+ok(typeof verState.sourceFailureCount === "number", "state.json 下发 sourceFailureCount（1.4.1，只读计数）", verState.sourceFailureCount);
 
 /* 三档检查源：更新 / 无更新 / 失败 */
 const restoreFetch = [];

@@ -195,7 +195,18 @@ curl -X POST -H "Content-Type: application/json" \
 由 `GET /dsh-app-updater/state.json` 的 `pluginInfo` 只读下发。检查走
 `GET /dsh-app-updater/check-update`，执行走 `POST /dsh-app-updater/self-update`（同样要求
 `confirm:true` + `csrfToken`）。接口细节见 [CONTRACT.md](CONTRACT.md)。
-> 仅凭「来自 127.0.0.1」不再放行 —— 1.3.1 已把这条路径改成默认拒绝。
+
+## 官网下载源 403 的应用自动降级（1.4.1）
+
+有些应用的发布方 CDN / winget 清单源会返回 403 Forbidden（实测 `NetEase.UURemote`，
+即 UU远程）。`winget download` 与 `winget upgrade` 共用同一个安装包 URL，
+换 UA、重试、兜底都会复现，插件侧修不了，但扫描阶段无法预知。
+
+1.4.1 起**按 winget id 记住**这类失败（不硬编码包名）：某次更新报 403 后，
+宿主把它写进 `state.json`；下一次扫描该应用显示「需手动」、给出
+「等待发布方修复 / 到官网手动下载」提示，不再出现在「仅可更新」里，
+也不会被「全部更新」带上（避免点一个必然失败的按钮）。发布方修复后
+该应用更新成功即清除记录，自动恢复一键更新。403 也不再被当作网络抖动重试。
 
 ---
 
@@ -374,6 +385,7 @@ Edge 走它自带的更新服务：winget 目录里的 `Microsoft.Edge` 是企�
 | `lib/registry.js` | 注册表 `Uninstall` 键枚举（PowerShell，UTF-8） |
 | `lib/version.js` | Windows 风格版本比较（含 SemVer `+build` / 尾缀自然序） |
 | `lib/plugin-version.js` | 1.4.0：插件自身版本/时间读取、npm registry 比对、自更新命令构造（纯函数） |
+| `lib/source-failures.js` | 1.4.1：官网下载源 403 记录/识别与「需手动」降级（纯函数，不硬编码包名） |
 | `lib/state.js` | 状态与设置持久化（原子写）、CSRF token、跨平台设置裁剪 |
 | `lib/proc.js` | 子进程执行（超时 / AbortSignal / 进程组取消 / StringDecoder） |
 | `lib/macos.js` | macOS 数据层：`.app` 枚举、cask 目录竞速与缓存、列表组装 |

@@ -1117,5 +1117,73 @@ group("1.4.0 自更新失败：给出失败提示并允许重试");
   ok(!textOf(t).includes("立即更新"), "自更新失败后不残留「立即更新」");
 }
 
+/* ---------------- 1.4.1：下载源 403 行降级为「需手动」 ---------------- */
+group("1.4.1 官网下载源 403：不再列为可一键更新");
+{
+  // 模拟宿主扫描后的行：UU远程 已被 applySourceFailure 降级
+  const state403 = baseState({
+    apps: {
+      scannedAt: Date.now(),
+      stats: { total: 2, upgradable: 1, manual: 1, unsupported: 0 },
+      items: [
+        { id: "Git.Git", name: "Git", version: "2.55.0", available: "2.56.0", publisher: "Git", source: "winget", hasUpdate: true, updateSupported: true, reason: null },
+        {
+          id: "NetEase.UURemote", name: "UU远程", version: "4.45.1.4372", available: "4.47.0.5146",
+          publisher: "NetEase", source: "winget", hasUpdate: true, updateSupported: false,
+          reason: "source-unavailable", latestNewer: true, latestVersion: "4.47.0.5146", latestVia: "source-failure",
+          adoptHint: "发布方下载源返回 403，插件暂时无法自动下载；请等待发布方修复，或到官网手动下载新版安装",
+        },
+      ],
+    },
+    sourceFailures: { "NetEase.UURemote": { at: Date.now(), reason: "官网下载源拒绝访问（403 Forbidden）" } },
+  });
+  statePayload = state403;
+  rt.reset();
+  await tick();
+  let t = rt.render();
+  await tick();
+  t = rt.render();
+
+  // ① 状态列显示「需手动」并带 403 说明，而不是「有新版本」
+  const manualStates = byClass(t, "appupd-state-manual").map(textOf);
+  ok(manualStates.includes("需手动"), "403 行状态列显示「需手动」", manualStates);
+  const manualCell = byClass(t, "appupd-state-manual").find((n) => textOf(n) === "需手动");
+  ok(manualCell && /403/.test(String(manualCell.props.title || "")), "悬停说明里点明 403 与官网下载源", manualCell && manualCell.props.title);
+  ok(manualCell && /官网手动|官网下载|发布方修复/.test(String(manualCell.props.title || "")), "悬停给出可操作下一步");
+
+  // ② 可勾选集合只含 Git，403 行不被「全部更新」带上
+  const boxes = byClass(t, "appupd-cb");
+  // 表头全选框 + 每行一个；403 行的 checkbox 应 disabled
+  const rowBoxes = boxes.filter((b) => b.props["aria-label"] !== "全选可更新的应用");
+  ok(rowBoxes.length === 2, "渲染出 2 个行勾选框", rowBoxes.length);
+  const disabledBoxes = rowBoxes.filter((b) => b.props.disabled === true);
+  ok(disabledBoxes.length === 1, "403 行的勾选框被禁用（不会被勾上）", disabledBoxes.length);
+
+  // ③ 「仅可更新」分段不出现 403 行
+  const updBtn = byClass(t, "appupd-seg-btn").find((b) => textOf(b) === "仅可更新");
+  if (updBtn) {
+    await updBtn.props.onClick();
+    await tick();
+    t = rt.render();
+    await tick();
+    const names = byClass(t, "appupd-name").map(textOf);
+    ok(!names.includes("UU远程") && names.includes("Git"), "「仅可更新」里不再有必然失败的 403 行", names);
+  }
+
+  // ④ 「需手动」分段收下 403 行（与 macOS「官网有新版」同口径）
+  const allBtn = byClass(t, "appupd-seg-btn").find((b) => textOf(b) === "全部");
+  if (allBtn) { await allBtn.props.onClick(); await tick(); t = rt.render(); await tick(); }
+  const manualBtn = byClass(t, "appupd-seg-btn").find((b) => textOf(b) === "需手动");
+  if (manualBtn) {
+    await manualBtn.props.onClick();
+    await tick();
+    t = rt.render();
+    await tick();
+    const names = byClass(t, "appupd-name").map(textOf);
+    ok(names.includes("UU远程"), "「需手动」分段收下 403 行", names);
+  }
+  ok(textOf(t).includes("官网下载源不可用（403）") || textOf(t).includes("需手动"), "原因文案可溯源到 403");
+}
+
 console.log(`\n${failures === 0 ? "全部通过" : "存在失败"}：${checks - failures}/${checks}`);
 process.exit(failures === 0 ? 0 : 1);

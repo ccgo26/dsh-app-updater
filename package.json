@@ -1,6 +1,6 @@
 {
   "name": "dsh-app-updater",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "type": "module",
   "description": "App Updater for DeepSeek Harness: detect every installed app that has a newer version and update it with one click by downloading the vendor's full installer from its official website and installing it silently — without launching the app. Windows (winget) and macOS (Homebrew), architecture-aware (ARM64 / x64). · 检测本机所有已安装应用是否有新版本，并从各自官网下载全量安装包一键静默更新（不需要打开被检测的软件）；自动识别 Windows / macOS 与 ARM64 / x64 架构，按架构下载对应安装包。",
   "license": "MIT",

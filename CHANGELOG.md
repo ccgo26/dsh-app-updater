@@ -2,6 +2,42 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.4.1] — 2026-11-13
+
+### 修复：官网下载源 403 的应用不再列为「可一键更新」（Windows）
+
+现场：Windows 11 build 26300 / x64 / winget 1.29.380，「全部更新」结果
+`成功 0 / 1（1 个失败）`，红字为
+`UU远程 — 官网下载源拒绝访问（403 Forbidden）：发布方 CDN 或清单源不可用`。
+这是 1.3.17 已确认的 `NetEase.UURemote` 发布方 CDN 侧问题：`winget download`
+与 `winget upgrade` 共用同一个 `InstallerUrl`，换任意 UA、重试、兜底都复现 403，
+插件侧修不了。但扫描阶段无法预知 URL 是否 403，该应用仍被列进「可一键更新」，
+用户点下去必然失败。
+
+本版做了两件事（**不硬编码包名**，按 winget id 通用记录）：
+
+- **失败后记住、下次扫描降级**：新增 `lib/source-failures.js` 纯函数模块与
+  `state.json` 的 `sourceFailures` 表。更新任务收尾时把「源级 403」失败的 id
+  （含时间戳）写进 `state.json`；下一次扫描 `scanApps({ sourceFailures })` 对命中行
+  应用 `applySourceFailure()`：`hasUpdate` 保留（目录里确实有新版，不谎报「已是最新」），
+  `updateSupported=false`、`reason="source-unavailable"`、带 `latestNewer/latestVersion`
+  与可操作提示，从而落进前端「需手动」分段、不出现在「仅可更新」、勾选框禁用、
+  不会被「全部更新」带上。状态列显示「需手动」，悬停说明 403 与
+  「等待发布方修复 / 到官网手动下载」。
+  **发布方修复后自动恢复**：该 id 后续更新成功即清除记录，行自动回到可一键更新。
+  记录上限 200 条，`state.json` 只下发 `sourceFailureCount` 计数，不暴露内部表。
+- **去掉无意义的重试**：`isRetryableDownloadError()` 旧正则里 `HTTP [45]\d\d`
+  会把 403 当网络抖动，再白跑 2 次 `winget download`（1s / 3s 退避）。
+  1.4.1 起 `0x80190193 / Forbidden (403) / 403 Forbidden / 官网下载源拒绝访问`
+  明确判为不可重试；真·超时、其它 5xx 仍照常重试。
+
+自测（`npm test`：unit / render / deny 三套全绿）：纯函数覆盖 403 识别、结果挑选、
+合并/恢复/上限、`applySourceFailure` 降级与不修改入参、403 不重试；
+Store 层覆盖默认状态、落库、成功清除；render 层覆盖 403 行显示「需手动」、
+勾选框禁用、「仅可更新」不含它、「需手动」收下它；
+`deny.mjs` 覆盖 `state.json` 下发 `sourceFailureCount`。
+另做了真实落盘闭环验证：更新失败 → 写盘 → 重启读回 → 降级 → 更新成功 → 恢复。
+
 ## [1.4.0] — 2026-11-13
 
 ### 新增：插件界面底部「版本信息」区（版本展示 / 检查更新 / 立即更新）
