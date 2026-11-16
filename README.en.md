@@ -109,6 +109,36 @@ curl -X POST -H "Content-Type: application/json" \
 
 ---
 
+## macOS: no more false "update succeeded" when two metadata sources disagree (1.4.2)
+
+Before 1.4.2 the UI could show `Last update: 3 / 3 successful` while every row's
+"verified version" was still the old one (1 s each) and the list still said a new
+version was available.
+
+The plugin's update check uses a cached `cask.json` catalog, while
+`brew upgrade --cask` reads Homebrew's own API cache — two separate datasets. The
+catalog may already list a new version while Homebrew's cache refresh fails and
+falls back to a stale copy, so brew prints
+`Warning: Not upgrading ..., the latest version is already installed` and exits 0
+without installing anything. The old verifier only checked
+"installed version >= previous version", so unchanged == success.
+
+Since 1.4.2:
+
+- The verifier also compares against the scanned target version ("available").
+  If the on-disk version did not reach the target, the result is a **failure** with
+  "before / after / target" and a hint to run `brew update` in a terminal.
+- Before installing, the plugin reads the local `brew info --cask --json=v2`
+  version; if it clearly trails the catalog target it reports
+  "Homebrew metadata out of sync" instead of running a no-op upgrade.
+- Brew's "already installed" no-op output is recognized; results whose on-disk
+  `.app` version cannot be read are marked "installed, unverified" instead of
+  being reported as success.
+- The UI shows the cask catalog cache's origin and age next to "Last scan"
+  (highlighted when stale), so a two-source mismatch is visible at a glance.
+
+---
+
 ## Safety boundaries
 
 - **Every route is deny-by-default**: each request first goes through `ctx.connection.admit(request)`

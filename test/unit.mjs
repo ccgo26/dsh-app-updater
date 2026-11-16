@@ -1732,6 +1732,83 @@ console.log("\n1.4.1 下载源 403 记录 / 需手动降级 / 重试排除");
   ok(r2.removed.length === 1 && !st.state.sourceFailures["NetEase.UURemote"], "Store 更新成功后清记录");
 }
 
+/* ---------------- 1.4.2：macOS「成功 3/3 但复核版本仍是旧版」 ---------------- */
+group("1.4.2 macOS 复核必须引入目标版本，识别 brew 空转与元数据滞后");
+{
+  const {
+    isBrewUpgradeNoOp,
+    brewMetadataStale,
+    evaluateMacosUpdate,
+  } = await import("../lib/engine.js");
+
+  /* 现场回放：截图里三条结果 ok=true、verified 就是旧版、耗时 0.5s。
+     根因是目录缓存（12.36.4）比本机 brew 元数据（12.36.3）新，
+     brew upgrade 空转退出 0，旧判据「装后 == 装前」判成功。 */
+  const site = [
+    { before: "12.36.3", after: "12.36.3", now: "12.36.3", target: "12.36.4", brewVersion: "12.36.3" },
+    { before: "2.190.0", after: "2.190.0", now: "2.190.0.55924", target: "2.191.0.55939", brewVersion: "2.190.0.55924" },
+    { before: "5.9.3", after: "5.9.3", now: "5.9.3.42398134-d4692421", target: "5.11.3.43806934-ecace0f7", brewVersion: "5.9.3.42398134-d4692421" },
+  ];
+  for (const c of site) {
+    const v = evaluateMacosUpdate({ before: c.before, after: c.after, now: c.now, target: c.target, noOp: true });
+    ok(v.verdict === "failed", `现场 ${c.target}：装后仍是装前版本 → 必须判失败，不能报成功`, v);
+    ok(v.verified === "", `现场 ${c.target}：失败项不再把旧版写进 verified 冒充「复核版本」`, v);
+    ok(/brew update/.test(v.reason), `现场 ${c.target}：错误文案给出可执行下一步 brew update`, v.reason);
+    ok(
+      brewMetadataStale({ target: c.target, brewVersion: c.brewVersion }) === true,
+      `现场 ${c.target}：执行前就能识别出本机 brew 元数据滞后（避免空转）`
+    );
+  }
+
+  // 真正升上去的：磁盘版本达到目标（含 cask 版本串带构建号的归一）
+  const realUp = evaluateMacosUpdate({ before: "2.190.0", after: "2.191.0", now: "2.191.0.55939", target: "2.191.0.55939", noOp: false });
+  ok(realUp.verdict === "ok" && realUp.verified === "2.191.0", "真升级：cask 目标带构建号、磁盘只有主版本 → 判成功", realUp);
+  const realUp2 = evaluateMacosUpdate({ before: "5.9.3", after: "5.11.3", now: "5.11.3.43806934-ecace0f7", target: "5.11.3.43806934-ecace0f7", noOp: false });
+  ok(realUp2.verdict === "ok", "真升级：目标带 -哈希 尾缀也能归一后判成功", realUp2);
+  const newerDisk = evaluateMacosUpdate({ before: "1.0.0", after: "1.2.0", now: "1.2.0", target: "1.1.0", noOp: false });
+  ok(newerDisk.verdict === "ok", "磁盘版本超过目标（发布方又发了新版）仍算生效");
+
+  // 读不到磁盘版本：不谎报成功、不武断失败
+  const noDisk = evaluateMacosUpdate({ before: "1.0.0", after: "", now: "1.1.0", target: "1.1.0", noOp: false });
+  ok(noDisk.verdict === "unverifiable" && noDisk.verified === "1.1.0", "读不到磁盘版本 → 已安装·未复核", noDisk);
+  const noDiskNoNow = evaluateMacosUpdate({ before: "1.0.0", after: "", now: "", target: "1.1.0", noOp: false });
+  ok(noDiskNoNow.verdict === "unverifiable" && noDiskNoNow.verified === "", "brew 也读不到 → 未复核且 verified 为空", noDiskNoNow);
+
+  // 没有目标版本（老 plan 兼容）：退回 1.3.12 判据，但空转不能算成功
+  const legacyOk = evaluateMacosUpdate({ before: "1.0.0", after: "1.1.0", now: "1.1.0", target: "", noOp: false });
+  ok(legacyOk.verdict === "ok", "无目标版本时，磁盘确实变新 → 仍判成功（兼容旧 plan）");
+  const legacySame = evaluateMacosUpdate({ before: "1.0.0", after: "1.0.0", now: "1.0.0", target: "", noOp: false });
+  ok(legacySame.verdict === "ok", "无目标版本且本来就已最新 → 保持旧判据");
+  const legacyNoOp = evaluateMacosUpdate({ before: "1.0.0", after: "1.0.0", now: "1.0.0", target: "", noOp: true });
+  ok(legacyNoOp.verdict === "unverifiable", "无目标版本但 brew 报空转 → 未复核，不谎报成功");
+  const regressed = evaluateMacosUpdate({ before: "1.2.0", after: "1.0.0", now: "1.0.0", target: "", noOp: false });
+  ok(regressed.verdict === "failed", "磁盘版本倒退 → 判失败");
+
+  // 空转识别：只认 Homebrew 自己那几句，不误伤正常输出
+  ok(isBrewUpgradeNoOp({ stdout: "", stderr: "Warning: Not upgrading postman, the latest version is already installed" }), "识别 brew upgrade 空转输出");
+  ok(isBrewUpgradeNoOp({ stdout: "Warning: the latest version is already installed", stderr: "" }), "stdout 里的已是最新也能识别");
+  ok(!isBrewUpgradeNoOp({ stdout: "==> Installing Cask postman", stderr: "" }), "普通安装过程行不算空转");
+  ok(!isBrewUpgradeNoOp({ stdout: "Error: checksum mismatch", stderr: "" }), "真正的报错不算空转");
+
+  // 元数据滞后：构建号不能被当成新版本号
+  ok(brewMetadataStale({ target: "2.191.0.55939", brewVersion: "2.190.0.55924" }), "构建号串按主版本比，2.191.0 > 2.190.0 → 滞后");
+  ok(!brewMetadataStale({ target: "2.190.0.55939", brewVersion: "2.190.0.55924" }), "仅构建号不同不算版本滞后（同一主版本）");
+  ok(!brewMetadataStale({ target: "12.36.3", brewVersion: "12.36.3" }), "两边一致不判滞后");
+  ok(!brewMetadataStale({ target: "", brewVersion: "1.0.0" }), "缺目标版本时保守不判");
+  ok(!brewMetadataStale({ target: "12.36.4", brewVersion: "" }), "读不到本机版本时保守不判（交给 brew 自己报错）");
+
+  // 源码结构：复核确实读 plan.available、执行前确实做元数据对齐
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../lib/engine.js"), "utf8");
+  ok(/planItem\.available/.test(src), "复核从 plan 里取目标版本 available");
+  ok(/brewMetadataStale/.test(src) && /loadCaskInfo\(token, brewPath/.test(src), "执行前读本机 brew info 并比对元数据");
+  ok(/entry\.noOp = isBrewUpgradeNoOp\(upRes\)/.test(src), "brew 空转标志从安装结果带进复核");
+  ok(/entry\.unverifiable = true/.test(src), "读不到磁盘版本时显式标 unverifiable");
+  const idx = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../lib/index.js"), "utf8");
+  ok(/catalogMeta: \(s\.apps && s\.apps\.catalogMeta\) \|\| null/.test(idx), "/state.json 下发 catalogMeta");
+  const cli = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../lib/client.js"), "utf8");
+  ok(/目录缓存/.test(cli) && /catalogMeta\.stale/.test(cli), "界面显示目录缓存新鲜度与来源");
+}
+
 /* ---------------- 结果 ---------------- */
 console.log(`\n${failures === 0 ? "全部通过" : "存在失败"}：${checks - failures}/${checks}`);
 process.exit(failures === 0 ? 0 : 1);

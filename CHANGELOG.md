@@ -2,6 +2,57 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.4.2] — 2026-11-16
+
+### 修复：macOS「成功 3/3」但版本没变（目录缓存超前于本机 Homebrew 元数据）
+
+现场（本机 Apple Silicon / macOS Darwin 27 / Homebrew 7.0.13）：设置 → 应用更新 →
+`上次更新：成功 3 / 3`，三条明细却是
+
+```
+Postman — 复核版本 12.36.3 · 耗时 1s
+QQLive — 复核版本 2.190.0 · 耗时 1s
+WorkBuddy — 复核版本 5.9.3 · 耗时 1s
+```
+
+下方列表仍显示「可升级到 12.36.4 / 2.191.0.55939 / 5.11.3.43806934-ecace0f7 · 有新版」。
+
+根因链（逐条本机实测）：
+
+- 插件判断「有新版」用的是 `cask.json` 目录缓存（来自 `mirrors.ustc.edu.cn`，
+  10:08 抓取，TTL 24h），里面这三个 cask 是 12.36.4 / 2.191.0.55939 /
+  5.11.3.43806934-ecace0f7。
+- 真正执行更新的 `brew upgrade --cask` 读的是**本机 Homebrew 自己的 API 缓存**，
+  刷新时报 `packages.arm64_golden_gate.jws.json: update failed, falling back to
+  cached version`，仍只认 12.36.3 / 2.190.0.55924 / 5.9.3.42398134-d4692421；
+  `brew outdated --cask --greedy` 也只报 `uuremote`。两份数据错位。
+- `brew upgrade --cask postman` 于是 0.3 秒打印
+  `Warning: Not upgrading postman, the latest version is already installed` 空转退出 0。
+- macOS 侧复核判据只比「装后磁盘版本 >= 装前版本」，`compareVersions(装后, 装前) === 0`
+  恒为真 → 报 `ok=true`，还把**旧版本**写进 `verified`，界面渲染成「复核版本 12.36.3」。
+  与 Windows 侧 `evaluateUpdateResult`（拿 `target` 比）口径不一致。
+
+本版四道防线（**只动 macOS 路径**，Windows 逐字不变）：
+
+- **复核引入目标版本**：新增纯函数 `evaluateMacosUpdate({ before, after, now, target, noOp })`，
+  把 `plan[].available`（扫描时的「可升级到」）带进复核。装后版本未达到目标即判失败，
+  并写明「装前 / 装后 / 目标」；`verified` 不再写旧版冒充复核结果。cask 目标串里的
+  构建号 / `-哈希` 尾缀先经 `splitCaskVersion().short` 归一，避免把 9 个真实升级报成失败。
+- **执行前对齐数据源**：`brew upgrade/install` 之前读本机 `brew info --cask --json=v2`，
+  若本机元数据明显落后于目录目标（`brewMetadataStale`），直接报
+  「本机 Homebrew 元数据未同步……请在终端执行 `brew update` 后重试」，不再让 brew 空转。
+- **识别空转输出**：`isBrewUpgradeNoOp()` 认 `Not upgrading ... already installed` 这类
+  Warning；即使没走到预检（例如 `plan` 未带 `available` 的旧数据），也不把空转判成成功，
+  改列「已安装·未复核」。读不到磁盘 `.app` 版本的结果同样显式标 `unverifiable`。
+- **缓存新鲜度可见**：扫描把 `catalogMeta`（来源 / 抓取时间 / 是否过期）经
+  `/state.json` 下发，界面在「上次扫描」旁显示「目录缓存 N 小时前 · 来自 xxx」，
+  过期标红。两源错位时用户能自查，不必等点了更新才看到矛盾结果。
+
+自测（`npm test`：unit 571 / render 135 / deny 28 全绿）：`unit.mjs` 用 `state.json`
+里三条真实结果回放「空转 → 旧判据报成功 → 新判据报失败」，并覆盖真升级、
+cask 构建号归一、读不到磁盘版本、无目标版本的兼容路径、空转识别、
+元数据滞后判定，以及源码结构 / 状态下发 / 界面渲染断言。
+
 ## [1.4.1] — 2026-11-13
 
 ### 修复：官网下载源 403 的应用不再列为「可一键更新」（Windows）
