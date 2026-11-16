@@ -2,6 +2,59 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.4.3] — 2026-11-16
+
+### 修复：兜底「已成功安装」被误记成失败（Windows，微信成功 0/1）
+
+现场：Windows 11 build 26300 / x64 / winget 1.29.380，单独更新微信
+（`Tencent.WeChat.Universal`）。官网全量 NSIS 包静默安装返回 `1`（应用正在运行、
+无法覆盖自身），自动兜底 `winget upgrade` **其实装成功了**，输出里写着
+「已成功安装」，但退出码非 0（winget 的「装完仍需重启/收尾」类返回码）。
+结果却是：
+
+```
+上次更新：成功 0 / 1（1 个失败）
+微信 — 安装程序返回 1（静默安装被中止…）；兜底失败：[winget upgrade] 已成功安装
+```
+
+根因有两层，都在 `lib/engine.js`：
+
+- `wingetUpgradeFallback()` **只认退出码**：`res.ok === false` 就走
+  `classifyWingetError()`，不看 winget 自己是否已经报告成功。1.4.2 的
+  Windows 路径逐字未动，所以 1.3.17 之后的版本都带这个坑。
+- `classifyWingetError()` 在认不出已知错误时取「输出最后一行」当原因。
+  成功收尾行「已成功安装」于是被原样当成错误文案，再经
+  `formatFallbackError()` 拼成「兜底失败：[winget upgrade] 已成功安装」。
+
+本版修法（纯函数、可测，不改子进程与设置）：
+
+- 新增 `isWingetSuccessOutput(text)`：识别中英文成功文案
+  （`已成功安装 / 已成功升级 / 安装成功 / Successfully installed / …`），
+  且**排除**同时出现明确失败行的输出（不凭一句成功文案给失败翻盘）。
+- 新增 `wingetFallbackOutcome(res)` 统一判定，优先级：
+  ① 输出明确成功 → 成功（退出码非 0 也认）；② 退出码 0 → 成功；
+  ③ `0x8A150109` / `3010`「装完需重启」→ 成功；
+  ④ 无适用更新 → 明确失败；⑤ 其余 → `classifyWingetError`。
+- `classifyWingetError()` 的「最后一行」候选剔除成功行，全是成功行时返回空串，
+  不再把成功文案透出成错误。
+- 兜底已报告成功时**不再按架构错误重试第二次**，避免第二次的「无适用更新」
+  把成功结果覆盖掉。
+
+### 兼容性
+
+- 只改 Windows `winget upgrade` 兜底的判定，扫描 / 下载 / 主安装 / 复核 / macOS
+  路径零改动；不新增设置项、不新增依赖、`state.json` 结构不变。
+- 真实失败（`安装程序失败，退出代码为: 2`、403、哈希不符、无适用更新）仍按
+  原语义报错，不会被成功文案误翻成成功。
+
+### 测试
+
+`npm test` 全绿（unit / render / deny，项数以实际输出为准）。顺手修掉 1.4.0 遗留的
+一条测试：`从 PATH 找到 dsh` 写死 POSIX 的 `dsh`，在 Windows 上恒失败（实现按
+`dsh.cmd` 找），改为按 `process.platform` 选名字，两种平台都锁住真实行为。新增
+`test/repro-1318.mjs` 现场回放（读本机 `state.json` 的历史失败记录，缺文件时
+用内置副本），把「退出码 1 + 已成功安装」喂给新判定函数，断言判成成功。
+
 ## [1.4.2] — 2026-11-16
 
 ### 修复：macOS「成功 3/3」但版本没变（目录缓存超前于本机 Homebrew 元数据）

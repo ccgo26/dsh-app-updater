@@ -19,7 +19,7 @@ import {
   sliceByWidth,
 } from "../lib/winget.js";
 import { compareVersions, isNewer, looksLikeVersion, splitVersion, compareTails, normalizeVersionKey } from "../lib/version.js";
-import { parseInstallerManifest, splitSwitchArgs, defaultSilentArgs, resolveInstallArgs, parseBrewCaskVersions, parseBrewOutdated, findBrew, isArchNotFoundError, explainInstallerExitCode, evaluateUpdateResult, findEdgeUpdate, updateHintFor, pickInstallerSha256, verifyInstallerHash, sha256File, classifyWingetError, isSourceLevelFailure, formatFallbackError, idArchSuffix, archMismatchFor, humanizeMissingAppError, humanizeBrewError, isRetryableDownloadError } from "../lib/engine.js";
+import { parseInstallerManifest, splitSwitchArgs, defaultSilentArgs, resolveInstallArgs, parseBrewCaskVersions, parseBrewOutdated, findBrew, isArchNotFoundError, explainInstallerExitCode, evaluateUpdateResult, findEdgeUpdate, updateHintFor, pickInstallerSha256, verifyInstallerHash, sha256File, classifyWingetError, isSourceLevelFailure, formatFallbackError, idArchSuffix, archMismatchFor, humanizeMissingAppError, humanizeBrewError, isRetryableDownloadError, isWingetSuccessOutput, wingetFallbackOutcome } from "../lib/engine.js";
 import { isDownloadSource403, sourceFailedIds, sourceRecoveredIds, mergeSourceFailures, applySourceFailure, MAX_SOURCE_FAILURES } from "../lib/source-failures.js";
 import { psQuote, ELEVATION_CANCELLED, isElevated } from "../lib/elevate.js";
 import {
@@ -1672,7 +1672,13 @@ console.log("\n1.4.0 版本信息 / 更新判断");
   ok(buildSelfUpdateCommand("1.5.0", "") === null, "缺 dsh 路径不构造命令");
 
   ok(findDshCli({ env: { PATH: "" }, exists: () => false }) === "", "PATH 找不到 dsh 返回空串");
-  ok(findDshCli({ env: { PATH: "/x/y" }, exists: (p) => p === "/x/y/dsh" }) === "/x/y/dsh", "从 PATH 找到 dsh");
+  /* 1.4.3：原测试写死 POSIX 的 dsh 与 "/x/y/dsh" 全等，但 findDshCli 在
+     Windows 上按实现找 dsh.cmd、且 path.join 会用反斜杠拼路径，于是这条在
+     Windows 上恒失败（与本次修复无关，属既有测试的平台假设）。改成「按平台选
+     文件名 + 只断言能以该文件名结尾」，跨平台都锁住真实行为而不绑死分隔符。 */
+  const dshName = process.platform === "win32" ? "dsh.cmd" : "dsh";
+  const foundDsh = findDshCli({ env: { PATH: "/x/y" }, exists: (p) => String(p).endsWith(dshName) });
+  ok(foundDsh !== "" && String(foundDsh).endsWith(dshName), "从 PATH 找到 dsh");
   ok(REGISTRY_LATEST_URL.includes("registry.npmjs.org"), "检查源是 npm 官方 registry");
 }
 
@@ -1807,6 +1813,39 @@ group("1.4.2 macOS 复核必须引入目标版本，识别 brew 空转与元数�
   ok(/catalogMeta: \(s\.apps && s\.apps\.catalogMeta\) \|\| null/.test(idx), "/state.json 下发 catalogMeta");
   const cli = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../lib/client.js"), "utf8");
   ok(/目录缓存/.test(cli) && /catalogMeta\.stale/.test(cli), "界面显示目录缓存新鲜度与来源");
+}
+
+
+/* ---------------- 1.4.3：兜底「已成功安装」不再被记成失败 ---------------- */
+group("1.4.3：winget 兜底成功文案识别");
+{
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../lib/engine.js"), "utf8");
+  ok(/wingetFallbackOutcome\(\{ ok: res\.ok, code: res\.code, text \}\)/.test(src), "wingetUpgradeFallback 统一走 wingetFallbackOutcome 判定");
+  ok(/isWingetSuccessOutput\(text\)/.test(src), "成功文案先于架构重试判断（避免成功被覆盖）");
+  ok(/WINGET_SUCCESS_LINE/.test(src) && /!WINGET_SUCCESS_LINE\.test\(l\)/.test(src), "classifyWingetError 把成功行从错误候选里剔除");
+
+  // 现场：微信兜底输出「已成功安装」但退出码非 0
+  ok(isWingetSuccessOutput("已成功安装"), "「已成功安装」识别为成功");
+  ok(isWingetSuccessOutput("Successfully installed"), "英文 Successfully installed 识别为成功");
+  ok(isWingetSuccessOutput("Successfully upgraded Tencent.WeChat.Universal"), "成功升级文案识别为成功");
+  ok(isWingetSuccessOutput("安装成功"), "「安装成功」识别为成功");
+  ok(!isWingetSuccessOutput(""), "空输出不算成功");
+  ok(!isWingetSuccessOutput("安装程序失败，退出代码为: 2"), "纯失败文案不算成功");
+  ok(!isWingetSuccessOutput("已成功安装；安装程序失败，退出代码为: 2"), "同时含成功与失败文案时不翻盘");
+
+  // 核心：输出说成功 → 无论退出码为何都判成功，且不再产生错误文案
+  const live = wingetFallbackOutcome({ ok: false, code: 1, text: "…\n已成功安装" });
+  ok(live.ok === true && !live.error, "现场：退出码 1 + 已成功安装 → 判成功（不再成功 0/1）");
+  ok(wingetFallbackOutcome({ ok: true, code: 0, text: "" }).ok === true, "正常退出码 0 仍判成功");
+  ok(wingetFallbackOutcome({ ok: false, code: 0x8a150109, text: "… 需要重启" }).ok === true, "装完需重启专用码判成功");
+  ok(wingetFallbackOutcome({ ok: false, code: 3010, text: "" }).ok === true, "3010 判成功（需重启）");
+
+  // 真实失败不受影响
+  const fail2 = wingetFallbackOutcome({ ok: false, code: 1, text: "安装程序失败，退出代码为: 2" });
+  ok(fail2.ok === false && /退出代码为/.test(fail2.error || ""), "无成功文案的真实失败仍判失败");
+  const noUpdate = wingetFallbackOutcome({ ok: false, code: 0x8a15002b, text: "No applicable update found" });
+  ok(noUpdate.ok === false && /没有适用的更新/.test(noUpdate.error || ""), "无适用更新仍归为明确失败");
+  ok(!/已成功安装/.test(classifyWingetError("已成功安装")), "classifyWingetError 不再把成功行当错误原因");
 }
 
 /* ---------------- 结果 ---------------- */
