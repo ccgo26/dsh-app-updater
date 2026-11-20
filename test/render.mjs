@@ -1185,5 +1185,78 @@ group("1.4.1 官网下载源 403：不再列为可一键更新");
   ok(textOf(t).includes("官网下载源不可用（403）") || textOf(t).includes("需手动"), "原因文案可溯源到 403");
 }
 
+/* ---------------- 1.4.4：架构不匹配行「三头不落」的回归 ---------------- */
+group("1.4.4 架构不匹配：不再三头不落，状态栏说清「无需更新」");
+{
+  // 现场：x64 机上 winget 把 VCRedist 的 arm64 变体报成「可升级」，
+  // 扫描已标 reason=arch-mismatch / updateSupported=false，
+  // 但统计里 upgradable 不含它、manual 也不含它 → 状态栏「2 个可更新」而实际只能更 1 个。
+  const stateArch = baseState({
+    apps: {
+      scannedAt: Date.now(),
+      // 1.4.4 的 stats：archMismatch 单列，manual 已含它
+      stats: { total: 3, upgradable: 1, manual: 2, archMismatch: 1, unsupported: 0 },
+      items: [
+        { id: "Git.Git", name: "Git", version: "2.55.0", available: "2.56.0", publisher: "Git", source: "winget", hasUpdate: true, updateSupported: true, reason: null },
+        {
+          id: "Microsoft.VCRedist.2015+.arm64", name: "Microsoft Visual C++ 2022 Redistributable (x64)",
+          version: "14.38.33135.0", available: "14.52.37029.0", publisher: "Microsoft Corporation",
+          source: "winget", hasUpdate: true, updateSupported: false, reason: "arch-mismatch",
+        },
+        { id: "Google.Chrome", name: "Chrome", version: "158.0.1", available: "", publisher: "Google", source: "winget", hasUpdate: false, updateSupported: false, reason: null },
+      ],
+    },
+    env: { platform: "win32", family: "windows", osName: "Windows 11", arch: "x64", archLabel: "x64（AMD64）" },
+  });
+  statePayload = stateArch;
+  rt.reset();
+  await tick();
+  let t = rt.render();
+  await tick();
+  t = rt.render();
+
+  // ① 状态栏把两类「需手动」分开说，且写明架构不匹配的无需更新
+  const statusLine = byClass(t, "appupd-status-strong").map(textOf).join(" ");
+  ok(statusLine.includes("3 个应用"), "状态栏总数正确", statusLine);
+  ok(statusLine.includes("1 个可更新"), "可更新条数不再把架构不匹配算进去", statusLine);
+  ok(/架构不匹配/.test(statusLine), "状态栏点明「架构不匹配本机」", statusLine);
+  ok(/无需更新/.test(statusLine), "状态栏说明架构不匹配无需更新", statusLine);
+
+  // ② 架构不匹配行有自己的状态文案，不再谎称「未收录」
+  const states = byClass(t, "appupd-state-manual").map(textOf);
+  ok(states.includes("架构不匹配"), "架构不匹配行显示「架构不匹配」", states);
+  ok(!byClass(t, "appupd-state-none").map(textOf).includes("未收录"), "不再把架构不匹配行混进「未收录」");
+
+  // ③ 该行不可勾选（不进「全部更新」）
+  const rowBoxes = byClass(t, "appupd-cb").filter((b) => b.props["aria-label"] !== "全选可更新的应用");
+  const archBox = rowBoxes.find((b) => {
+    const row = b.props && b.props["aria-label"];
+    return String(row || "").includes("VCRedist") || String(row || "").includes("Visual C++");
+  });
+  ok(!archBox || archBox.props.disabled === true, "架构不匹配行的勾选框被禁用", archBox && archBox.props.disabled);
+
+  // ④ 「需手动」分段收下它，「仅可更新」里没有它
+  const manualBtn = byClass(t, "appupd-seg-btn").find((b) => textOf(b) === "需手动");
+  if (manualBtn) {
+    await manualBtn.props.onClick();
+    await tick();
+    t = rt.render();
+    await tick();
+    const names = byClass(t, "appupd-name").map(textOf);
+    ok(names.some((n) => /Visual C\+\+|VCRedist/.test(n)), "「需手动」分段收下架构不匹配行", names);
+  }
+  const allBtn = byClass(t, "appupd-seg-btn").find((b) => textOf(b) === "全部");
+  if (allBtn) { await allBtn.props.onClick(); await tick(); t = rt.render(); await tick(); }
+  const updBtn = byClass(t, "appupd-seg-btn").find((b) => textOf(b) === "仅可更新");
+  if (updBtn) {
+    await updBtn.props.onClick();
+    await tick();
+    t = rt.render();
+    await tick();
+    const names = byClass(t, "appupd-name").map(textOf);
+    ok(!names.some((n) => /Visual C\+\+/.test(n)) && names.includes("Git"), "「仅可更新」里不含架构不匹配行", names);
+  }
+}
+
 console.log(`\n${failures === 0 ? "全部通过" : "存在失败"}：${checks - failures}/${checks}`);
 process.exit(failures === 0 ? 0 : 1);

@@ -2,6 +2,53 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.4.4] — 2026-11-20
+
+### 修复：架构不匹配的行在状态栏里「可更新」与「需手动」两头都不落（Windows，VC++ 误报）
+
+现场：Windows 11 build 26300 / x64 / winget 1.29.380，扫描 121 个应用、报「2 个可更新」，
+逐条更新却 0/2。其中一条是 `Microsoft.VCRedist.2015+.arm64`：
+
+```
+上次更新：成功 0 / 2（2 个失败）
+Microsoft Visual C++ 2022 Redistributable (x64) — 软件目录里找不到该包；兜底失败：软件目录里找不到该包
+```
+
+1.3.17 起这类行已经在扫描阶段标成 `reason: "arch-mismatch"`、`updateSupported: false`，
+不再进「全部更新」队列。但统计口径没跟上，导致界面对不上：
+
+- `stats.upgradable` 只数 `hasUpdate && updateSupported`，架构不匹配行不计入；
+- `stats.manual` 只在 `!hasUpdate` 时 +1，架构不匹配行 `hasUpdate: true`，**也不计入**；
+- 前端「需手动」分段只收 `latestNewer && latestVersion` 的行，架构不匹配行两个字段都没有，
+  于是掉进「未收录」；
+
+结果：一条明明已被正确判定的行，在「可更新 / 需手动 / 未收录」三个分段里**一个都不属于**，
+状态栏又显示「2 个可更新」，用户点下去必然得到 0/2。这不是 winget 的问题，是本插件自己的
+口径漏洞。
+
+本版修法（只动统计与展示，不动扫描判定）：
+
+- `lib/engine.js`：新增 `stats.archMismatch` 单独计数；架构不匹配行同时补计入 `manual`，
+  让 `upgradable + manual` 与 total 自洽；扫描日志在有此类行时追加
+  「（其中 N 个为架构不匹配，需手动）」。
+- `lib/client.js`：状态栏把「需手动」拆成两截说明
+  （`N 个官网有新版，需手动升级` / `N 个架构不匹配本机，无需更新`），架构不匹配行从
+  `manual` 里扣除后再显示，不重复计数；「需手动」分段收下 `reason: "arch-mismatch"` 的行，
+  并给出独立状态文案「架构不匹配」+ 悬停解释（本机架构、winget 只提供其它架构的安装包、
+  本机已装的同族运行库即为当前架构版本，无需处理）。
+
+### 兼容性
+
+- 扫描判定、更新队列、下载/安装/兜底路径零改动；`state.json` 结构不变。
+- `stats` 只新增可选字段 `archMismatch`，旧字段语义不变；读不到该字段的旧状态文件
+  在前端按 0 处理（老状态照常渲染）。
+- `reason: "arch-mismatch"` 的取值与文案映射不变（`reasonText` 里仍是「架构不匹配本机」）。
+
+### 测试
+
+`npm test` 全绿（unit / render / deny）。新增断言覆盖：架构不匹配行计入 `stats.manual` 与
+`stats.archMismatch`、不再落进「未收录」分段、状态栏分别说明两类「需手动」。
+
 ## [1.4.3] — 2026-11-16
 
 ### 修复：兜底「已成功安装」被误记成失败（Windows，微信成功 0/1）

@@ -1535,6 +1535,23 @@ group("1.3.17：架构不匹配与自更新保护");
   ok(/安装程序返回 1/.test(explainInstallerExitCode(1, "")), "退出码 1 给出可操作解释");
 }
 
+group("1.4.4：架构不匹配行的统计口径（不再三头不落）");
+{
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../lib/engine.js"), "utf8");
+  const cli = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../lib/client.js"), "utf8");
+  const scanBody = src.slice(src.indexOf("export async function scanApps"), src.indexOf("/* ------------------------------------------------------------------ */\n\nexport async function runUpdates"));
+  // ① 引擎：架构不匹配行要同时进 manual，并单列 archMismatch
+  ok(/reason === "arch-mismatch"/.test(scanBody) && /manualCount \+= 1/.test(scanBody), "架构不匹配行补计入 manualCount");
+  ok(/archMismatchCount \+= 1/.test(scanBody), "架构不匹配单独计数");
+  ok(/archMismatch: archMismatchCount/.test(src), "stats 暴露 archMismatch 字段");
+  ok(/需手动）/.test(src) || /架构不匹配，需手动/.test(src), "扫描日志点明架构不匹配条数");
+  // ② 前端：状态栏拆两类说明，「需手动」分段收下 arch-mismatch，「未收录」排除它
+  ok(/archMismatchCount/.test(cli), "前端读取 stats.archMismatch");
+  ok(/架构不匹配本机，无需更新/.test(cli), "状态栏说明架构不匹配无需更新");
+  ok(/a\.reason === "arch-mismatch"/.test(cli), "「需手动」分段收下架构不匹配行");
+  ok(/mode === "unsupported" && \(a\.updateSupported \|\| archMismatch/.test(cli), "「未收录」分段排除架构不匹配行");
+}
+
 group("1.3.18：孤儿 cask 判定（声明了 .app 但磁盘已丢失）");
 {
   /* 用假 exists 精确控制「磁盘上有哪些 .app」，纯函数、跨平台可复现。 */
