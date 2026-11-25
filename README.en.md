@@ -141,9 +141,11 @@ Since 1.4.2:
 
 ## Safety boundaries
 
-- **Every route is deny-by-default**: each request first goes through `ctx.connection.admit(request)`
-  — DSH's Host/Origin fence plus browser-session / API authentication, the same gate the host uses for
-  its own `/api` routes. Rejected requests get `401` / `403` / `409` with `X-DSH-Admission: denied`.
+- **Every route is deny-by-default, and authentication belongs to the host** (since 1.4.5): routes
+  register with `auth: "required"`, so the host runs the Host/Origin fence and browser-session / API
+  authentication before dispatching, then hands the admitted `peer` to the handler. A present `peer`
+  is accepted as-is — the plugin no longer re-authenticates. Rejected requests get
+  `X-DSH-Admission: denied`.
 - **Legacy loopback mode is off by default** (since 1.3.1): when the host has no `connection`
   service, requests are no longer trusted just because they come from loopback — they get `403`.
   If you really need it on an old host, opt in explicitly, either via plugin config:

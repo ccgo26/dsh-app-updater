@@ -548,7 +548,7 @@ ok(resolveLegacyLoopbackOptIn(undefined, { [LEGACY_LOOPBACK_ENV]: "off" }) === f
 {
   const res = fakeRes();
   const connection = { admit: () => undefined };
-  ok(admissionGate(fakeReq(), res, connection) === false && res.statusCode === 500, "准入返回空值 → 500（不把看不懂的结果放行）");
+  ok(admissionGate(fakeReq(), res, connection) === false && res.statusCode === 503, "准入返回空值 → 503（不把看不懂的结果放行）");
 }
 {
   const res = fakeRes();
@@ -604,6 +604,59 @@ ok(resolveLegacyLoopbackOptIn(undefined, { [LEGACY_LOOPBACK_ENV]: "off" }) === f
     "兼容模式的例外只覆盖回环地址，非回环仍然 401"
   );
 }
+
+/* --- 1.4.5 核心回归：宿主已认证时绝不再调 admit() ---
+   线上故障现场：路由以 auth:"required" 注册，宿主已认证并把 peer 交进来，
+   插件却又拿原始 IncomingMessage 调了一次 admit()，抛异常 → 500
+   「无法连接宿主：HTTP 500」。这条断言把「不再重复准入」钉死。 */
+{
+  const res = fakeRes();
+  let admitCalls = 0;
+  const connection = {
+    admit: () => {
+      admitCalls += 1;
+      throw new Error("must not be called when a peer already exists");
+    },
+  };
+  const peer = { id: "peer-1", principal: { kind: "owner" } };
+  ok(
+    admissionGate(fakeReq(), res, connection, { peer }) === true,
+    "宿主传入 peer → 直接放行"
+  );
+  ok(admitCalls === 0, "宿主传入 peer 时不再调用 admit()（消除重复准入）");
+  ok(res.statusCode === 0, "放行时不写任何响应");
+}
+{
+  // 兼容模式下同样：有 peer 就不再自查
+  const res = fakeRes();
+  let admitCalls = 0;
+  const connection = {
+    admit: () => {
+      admitCalls += 1;
+      throw new Error("boom");
+    },
+  };
+  ok(
+    admissionGate(fakeReq(), res, connection, { allowLegacyLoopback: true, peer: { id: "p" } }) === true,
+    "兼容模式 + 宿主已认证 → 放行"
+  );
+  ok(admitCalls === 0, "兼容模式下有 peer 也不重复准入");
+}
+{
+  // 没有 peer 时（旧宿主 / 兜底路径）仍然自查，但必须用规范化后的请求对象
+  const res = fakeRes();
+  let seen = null;
+  const connection = {
+    admit: (request) => {
+      seen = request;
+      return { peer: { id: "peer-2" } };
+    },
+  };
+  ok(admissionGate(fakeReq({ headers: { host: "127.0.0.1:1234" } }), res, connection) === true, "无 peer 时自查放行");
+  ok(seen && seen.url instanceof URL, "自查时传入的 url 是 URL 实例（宿主契约要求）");
+  ok(seen && seen.method === "GET" && seen.transport === "http", "自查时补齐 method / transport");
+  ok(seen && seen.headers && seen.headers.host === "127.0.0.1:1234", "自查时保留原始 headers");
+}
 {
   const res = fakeRes();
   const connection = {
@@ -611,7 +664,14 @@ ok(resolveLegacyLoopbackOptIn(undefined, { [LEGACY_LOOPBACK_ENV]: "off" }) === f
       throw new Error("carrier unavailable");
     },
   };
-  ok(admissionGate(fakeReq(), res, connection) === false && res.statusCode === 500, "准入抛错 → 500 而不是静默放行");
+  ok(
+    admissionGate(fakeReq(), res, connection) === false && res.statusCode === 503,
+    "准入抛错 → 503 而不是静默放行（并留下可排障痕迹）"
+  );
+  ok(
+    String(res.headers["X-DSH-Admission-Detail"] || "").includes("carrier unavailable"),
+    "准入抛错时把原因摘要挂到 X-DSH-Admission-Detail 头"
+  );
 }
 
 /* ---------------- 1.3.5 回归：尾缀自然序 / 本地哈希复核 ---------------- */
@@ -1334,7 +1394,7 @@ group("宿主半身：method / cancel target / downloadDir / 卸载");
   ok(/clearTimeout\(control\.rescanTimer\)/.test(src), "卸载时清掉自动重扫 timer");
   ok(/control\[key\]\.abort\(\)/.test(src), "卸载时 abort 后台 scan/update 任务");
   ok(/const owns = control\.updateAbort === abort/.test(src), "startUpdate 增加任务所有权校验");
-  ok(/连接准入服务异常，按默认拒绝处理/.test(src), "admit() 异常时不再把内部错误文案回给客户端");
+  ok(/连接准入服务暂不可用/.test(src), "admit() 异常时不再把内部错误文案回给客户端");
 }
 
 group("底层库：StringDecoder / 进程组取消 / 架构依据可观测");

@@ -234,9 +234,9 @@ curl -X POST -H "Content-Type: application/json" \
 
 ## 安全边界
 
-- **路由默认拒绝**：每个请求先过 `ctx.connection.admit(request)` —— DSH 用来做
-  Host/Origin 信任校验与浏览器会话 / API 认证的那套边界（宿主自己的 `/api` 路由用的就是它），
-  未通过的请求直接得到 `401` / `403` / `409`，响应头带 `X-DSH-Admission: denied`。
+- **路由默认拒绝，认证交给宿主**（1.4.5 起）：路由以 `auth: "required"` 注册，宿主先做
+  Host/Origin 信任校验与浏览器会话 / API 认证，通过后把 `peer` 交进 handler；拿到 `peer`
+  即放行，插件**不再重复认证**。被拒响应带 `X-DSH-Admission: denied`。
 - **兼容模式默认关闭**（1.3.1 起）：宿主没有 `connection` 服务时**不再**「仅凭回环地址放行」，
   一律 `403`。旧宿主上确实需要时，必须由你**显式**开启，二选一：
   - 插件配置（`cordis.patch.yml` 里覆盖同名条目）：

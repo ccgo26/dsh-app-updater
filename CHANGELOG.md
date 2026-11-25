@@ -2,6 +2,87 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.4.5] — 2026-11-25
+
+### 修复：设置页「无法连接宿主：HTTP 500」，整个应用更新面板空掉
+
+现场（本机 Apple Silicon / macOS Darwin 27 / Homebrew 7.0.14）：设置 → 应用更新，
+右上角显示
+
+```
+无法连接宿主：HTTP 500
+无法连接宿主：HTTP 500
+```
+
+并且整块 UI 都退化成空壳：运行环境显示「环境未知」、下载目录只显示占位符
+`%USERPROFILE%\Downloads\DSH App Updater`（本机是 macOS，路径也是 Windows 形状）、
+「正在读取状态…」永不停、运行日志为空、插件版本 `v 未知`。
+
+这些症状**全部来自同一个 `/dsh-app-updater/state.json` 请求失败**：前端
+`getJson()` 只看到状态码就抛 `HTTP 500`，于是拿不到 `env` / `downloadDir` /
+`pluginInfo`，只能各自退到兜底文案。
+
+根因在 `lib/index.js` 的 `admissionGate`：路由以「默认 auth」注册，宿主在分发到
+handler 前**已经**跑过 `webserver/authorize`（Host/Origin 围栏 + 浏览器会话 / API
+认证），认证通过时把 `peer` 作为 handler 第三个参数交进来。插件却在 handler 里
+**又拿原始 `node:http` 的 `IncomingMessage` 调了一次 `connection.admit(req)`**：
+
+```js
+admission = connection.admit(req);   // req 是 IncomingMessage，不是 ConnectionTrustRequest
+```
+
+`admit()` 的入参契约是 `{ headers, method, url: URL, transport, signal?, socket? }`
+——宿主自己在 `webserver/authorize` 里喂的是 `{ ...request, url: request.url.href }`。
+把原始请求对象直接丢进去，两者对 `url`（字符串 vs `URL`）等字段的假设不一致，
+真实宿主里就抛内部异常，插件再把它兜成 `500` 加一句泛化文案。
+
+实测证据（本机运行中的宿主，端口 53714）：
+
+| 请求 | 1.4.4 的结果 |
+| --- | --- |
+| 无 Cookie | `401 unauthorized`（宿主自己拒的，说明认证在前） |
+| 带有效 `dsh-auth-*` 会话 Cookie | **`500`**，头 `X-DSH-Admission: denied`，体 `连接准入服务异常，按默认拒绝处理` |
+| 同 Cookie 打宿主 `/api/remote.mux` | `404`（Cookie 有效、认证 provider 正常） |
+| `Host: evil.example.com` | `403`（宿主信任围栏正常） |
+| `/sidebar/api/*`、`/routing-suite/api/*` | `405` / `404`（其它插件路由正常） |
+
+即「认证是通的、别的插件是好的、只有本插件的二次准入炸了」，且只在**带着能通过
+认证的凭据**时才炸 —— 无 Cookie 时走的是干净的 401 分支，永远到不了抛错那行。
+
+顺带一个坑：`allowLegacyLoopback` 的豁免分支排在 `catch` **之后**，异常已经被兜成
+500 并 `return false`，根本走不到回环豁免。所以开兼容模式对这个故障**无效**，
+别白试。
+
+本版修法（长期方案：消除重复准入，而不是把异常吞得更漂亮）：
+
+- `lib/index.js`：路由改为 `auth: "required"`（兼容模式开启时降级 `"anonymous"`，
+  由插件闸门逐条判定），handler 接收宿主传入的第三个参数 `peer`。
+- `admissionGate()` 新增第 0 条规则：**拿到 `peer` 即放行，绝不再调 `admit()`**。
+  宿主已经完成认证，它的结论就是最终结论。
+- 新增 `toTrustRequest(req)`：兜底自查路径把 `IncomingMessage` 规范成宿主认的
+  `ConnectionTrustRequest`（`url` 为 `URL` 实例、补齐 `method` / `transport`）。
+- 兜底自查抛错时不再谎报 `500`：改为 `503`（语义是「准入服务暂不可用，可重试」），
+  并把原因首行写进 `X-DSH-Admission-Detail` 响应头 + 插件日志（`recordAdmissionFailure`），
+  下次同类故障能直接看到真实原因，不用再靠猜。
+- `README.md` / `README.en.md` / `CONTRACT.md` 同步「认证交给宿主、不重复准入」的边界说明。
+
+### 兼容性
+
+- 对外行为不变：被拒仍是 `401` / `403` / `409` + `X-DSH-Admission: denied`；
+  写操作仍要求 `confirm: true` + `csrfToken`；兼容模式的 opt-in 响应头不变。
+- 唯一可见差异：兜底自查**抛异常**时状态码从 `500` 改为 `503`，并多一个
+  `X-DSH-Admission-Detail` 头 —— 那本来就是「服务不可用」而不是「服务器内部错误」。
+- 没有 `peer` 的旧宿主 / 测试替身仍会自动退化到自查路径，功能不回退。
+
+### 测试
+
+`npm test` 全绿（unit 606 / render 144 / deny 28）。新增断言覆盖：
+
+- 宿主传入 `peer` 时**不再调用** `admit()`（`admitCalls === 0`，直接钉死这次的根因）；
+- 兼容模式下有 `peer` 同样不重复准入；
+- 兜底自查传入的是 `URL` 实例、`method` / `transport` 已补齐、`headers` 原样保留；
+- 自查返回空值 → `503`；自查抛错 → `503` 且 `X-DSH-Admission-Detail` 含原因摘要。
+
 ## [1.4.4] — 2026-11-20
 
 ### 修复：架构不匹配的行在状态栏里「可更新」与「需手动」两头都不落（Windows，VC++ 误报）

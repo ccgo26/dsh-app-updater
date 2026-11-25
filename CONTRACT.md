@@ -43,16 +43,24 @@ dsh-app-updater/
 
 ## 宿主 HTTP 路由
 
-全部 `kind: "exact"`，前缀 `/dsh-app-updater/`。每个请求先过 **connection 准入**：
-`ctx.connection.admit(req)`（DSH 的 Host/Origin 信任校验 + 浏览器会话 / API 认证，
-宿主自己的 `/api` 路由用的同一套），被拒即返回 `401`（未认证）/ `403`（不可信来源）/
-`409`（连接被占用），响应头带 `X-DSH-Admission: denied`；写操作再要求 `confirm: true`。
+全部 `kind: "exact"`，前缀 `/dsh-app-updater/`。路由以 `auth: "required"` 注册（兼容模式开启时
+降级为 `"anonymous"`，由插件自己的闸门逐条判定）。
+
+**准入以宿主为准，不再重复认证**（1.4.5 起）：宿主在分发到 handler 之前已经跑过
+`webserver/authorize`（Host/Origin 围栏 + 浏览器会话 / API 认证），认证通过时把 `peer`
+作为 handler 的第三个参数交进来。拿到 `peer` 即视为已认证，插件**不再**自己调
+`admit()` —— 那次重复调用在真实宿主里会抛异常，表现为界面「无法连接宿主：HTTP 500」。
+只有在没拿到 `peer` 的兜底场景（旧宿主 / 宿主未跑 auth）下，才用规范化后的请求对象
+（`toTrustRequest`：`url` 为 `URL` 实例、补齐 `method` / `transport`）调一次 `admit()`，
+按其结论处理：`401`（未认证）/ `403`（不可信来源）/ `409`（连接被占用）/
+`503`（准入服务自身异常，再把原因摘要挂到 `X-DSH-Admission-Detail` 头）；被拒响应带
+`X-DSH-Admission: denied`。写操作再要求 `confirm: true`。
 
 **默认拒绝**（1.3.1 起）：宿主没有 `connection` 服务时不再「仅凭回环地址放行」，而是 `403`。
 只有用户显式开启兼容模式（插件配置 `allowLegacyLoopback: true` 或环境变量
 `DSH_APP_UPDATER_ALLOW_LEGACY_LOOPBACK=1`）时，回环请求才放行，并带
 `X-DSH-Admission: loopback-legacy-optin` 与 `X-DSH-Admission-Warning`（见 `lib/index.js` 的
-`admissionGate` / `resolveLegacyLoopbackOptIn`）。
+`admissionGate` / `toTrustRequest` / `resolveLegacyLoopbackOptIn`）。
 
 ### GET /dsh-app-updater/state.json
 
